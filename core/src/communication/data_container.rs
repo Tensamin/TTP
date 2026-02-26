@@ -11,8 +11,10 @@ pub enum DataKind {
     Null,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub enum DataValue {
+    BoolTrue,
+    BoolFalse,
     Bool(bool),
     Number(i64),
     Str(String),
@@ -31,6 +33,8 @@ impl DataValue {
     pub fn kind(&self) -> DataKind {
         match self {
             DataValue::Bool(_) => DataKind::Bool,
+            DataValue::BoolTrue => DataKind::Bool,
+            DataValue::BoolFalse => DataKind::Bool,
             DataValue::Number(_) => DataKind::Number,
             DataValue::Str(_) => DataKind::Str,
             DataValue::Array(a) => DataKind::Array(Box::new(a.first().unwrap().kind())),

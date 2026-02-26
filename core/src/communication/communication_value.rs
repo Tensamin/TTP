@@ -59,20 +59,36 @@ impl CommunicationValue {
 }
 
 impl CommunicationValue {
+    /*
+     * [1 byte data type]
+     * [1 bit has sender, 1 bit has receiver, 1 bit has id, 5 placeholder]
+     * [optional 4 bytes id]
+     * [optional 6 bytes sender]
+     * [optional 6 bytes receiver]
+     * [4 bytes length of data]
+     * [data ...]
+     */
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::new();
 
-        // Build header byte
-        let mut header: u8 = self.comm_type.as_number() & 0b00111111;
+        buf.push(self.comm_type.as_number());
+
+        let mut flags: u8 = 0;
         if self.sender != 0 {
-            header |= 0b10000000;
+            flags |= 0b1000_0000; // bit 7 = has sender
         }
         if self.receiver != 0 {
-            header |= 0b01000000;
+            flags |= 0b0100_0000; // bit 6 = has receiver
         }
-        buf.push(header);
+        if self.id != 0 {
+            flags |= 0b0010_0000; // bit 5 = has id
+        }
 
-        buf.write_u32::<BigEndian>(self.id).unwrap();
+        buf.push(flags);
+
+        if self.id != 0 {
+            buf.write_u32::<BigEndian>(self.id).unwrap();
+        }
 
         if self.sender != 0 {
             buf.extend_from_slice(&self.sender.to_be_bytes()[2..]);
@@ -82,12 +98,64 @@ impl CommunicationValue {
             buf.extend_from_slice(&self.receiver.to_be_bytes()[2..]);
         }
 
-        // Data container
-        Self::write_data_container(&mut buf, &self.data);
+        let mut data_buf = Vec::new();
+        Self::write_data_container(&mut data_buf, &self.data);
+
+        buf.write_u32::<BigEndian>(data_buf.len() as u32).unwrap();
+
+        buf.extend_from_slice(&data_buf);
 
         buf
     }
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let mut cursor = Cursor::new(bytes);
 
+        let comm_type_num = cursor.read_u8().ok()?;
+        let comm_type = CommunicationType::from_number(comm_type_num);
+
+        let flags = cursor.read_u8().ok()?;
+        let has_sender = (flags & 0b1000_0000) != 0;
+        let has_receiver = (flags & 0b0100_0000) != 0;
+        let has_id = (flags & 0b0010_0000) != 0;
+
+        let id = if has_id {
+            cursor.read_u32::<BigEndian>().ok()?
+        } else {
+            0
+        };
+
+        let sender = if has_sender {
+            let mut buf = [0u8; 8];
+            cursor.read_exact(&mut buf[2..]).ok()?;
+            u64::from_be_bytes(buf)
+        } else {
+            0
+        };
+
+        let receiver = if has_receiver {
+            let mut buf = [0u8; 8];
+            cursor.read_exact(&mut buf[2..]).ok()?;
+            u64::from_be_bytes(buf)
+        } else {
+            0
+        };
+
+        let data_len = cursor.read_u32::<BigEndian>().ok()? as usize;
+
+        let mut data_bytes = vec![0u8; data_len];
+        cursor.read_exact(&mut data_bytes).ok()?;
+
+        let mut data_cursor = Cursor::new(data_bytes.as_slice());
+        let data = Self::read_data_container(&mut data_cursor)?;
+
+        Some(Self {
+            id,
+            comm_type,
+            sender,
+            receiver,
+            data,
+        })
+    }
     fn write_array(buf: &mut Vec<u8>, arr: &[DataValue]) {
         buf.write_u16::<BigEndian>(arr.len() as u16).unwrap();
 
@@ -136,6 +204,8 @@ impl CommunicationValue {
                     Self::write_data_container(&mut data_bytes, &inner_map);
                 }
                 DataValue::Array(arr) => Self::write_array(&mut data_bytes, arr),
+                DataValue::BoolTrue => data_bytes.extend_from_slice(&[1 as u8]),
+                DataValue::BoolFalse => data_bytes.extend_from_slice(&[0 as u8]),
                 DataValue::Bool(b) => {
                     data_bytes.extend_from_slice(&[if *b { 1 as u8 } else { 0 as u8 }]);
                 }
@@ -145,44 +215,6 @@ impl CommunicationValue {
             buf.write_u16::<BigEndian>(data_bytes.len() as u16).unwrap(); // 2-byte length
             buf.extend_from_slice(&data_bytes); // N bytes data
         }
-    }
-
-    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        let mut cursor = Cursor::new(bytes);
-
-        let header = cursor.read_u8().ok()?;
-        let has_sender = (header & 0b10000000) != 0;
-        let has_receiver = (header & 0b01000000) != 0;
-        let comm_type_num = header & 0b00111111;
-        let comm_type = CommunicationType::from_number(comm_type_num);
-
-        let id = cursor.read_u32::<BigEndian>().ok()?;
-
-        let sender = if has_sender {
-            let mut buf = [0u8; 8];
-            cursor.read_exact(&mut buf[2..]).ok()?;
-            u64::from_be_bytes(buf)
-        } else {
-            0
-        };
-
-        let receiver = if has_receiver {
-            let mut buf = [0u8; 8];
-            cursor.read_exact(&mut buf[2..]).ok()?;
-            u64::from_be_bytes(buf)
-        } else {
-            0
-        };
-
-        let data = Self::read_data_container(&mut cursor)?;
-
-        Some(Self {
-            id,
-            comm_type,
-            sender,
-            receiver,
-            data,
-        })
     }
     fn read_array(cursor: &mut Cursor<&[u8]>, element_kind: &DataKind) -> Option<Vec<DataValue>> {
         let len = cursor.read_u16::<BigEndian>().ok()? as usize;
@@ -274,5 +306,201 @@ impl CommunicationValue {
         }
 
         Some(data)
+    }
+}
+
+// ===============================================
+// Tests
+// ===============================================
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::communication::communication_types::CommunicationType;
+    use crate::communication::data_container::DataValue;
+    use crate::communication::data_types::DataTypes;
+
+    fn roundtrip(cv: CommunicationValue) -> CommunicationValue {
+        let bytes = cv.to_bytes();
+        CommunicationValue::from_bytes(&bytes).expect("Failed to deserialize")
+    }
+
+    #[test]
+    fn test_empty_message_roundtrip() {
+        let cv = CommunicationValue::new(CommunicationType::ping);
+
+        let decoded = roundtrip(cv.clone());
+
+        assert_eq!(decoded.get_type(), cv.get_type());
+        assert_eq!(decoded.get_id(), 0);
+        assert_eq!(decoded.get_sender(), 0);
+        assert_eq!(decoded.get_receiver(), 0);
+        assert!(decoded.data.is_empty());
+    }
+
+    #[test]
+    fn test_id_flag() {
+        let cv = CommunicationValue::new(CommunicationType::pong).with_id(42);
+
+        let bytes = cv.to_bytes();
+
+        // second byte = flags
+        let flags = bytes[1];
+        assert!(flags & 0b0010_0000 != 0); // has id
+
+        let decoded = roundtrip(cv);
+        assert_eq!(decoded.get_id(), 42);
+    }
+
+    #[test]
+    fn test_sender_receiver_flags() {
+        let cv = CommunicationValue::new(CommunicationType::message_send)
+            .with_sender(123456)
+            .with_receiver(654321);
+
+        let bytes = cv.to_bytes();
+        let flags = bytes[1];
+
+        assert!(flags & 0b1000_0000 != 0); // sender
+        assert!(flags & 0b0100_0000 != 0); // receiver
+
+        let decoded = roundtrip(cv);
+        assert_eq!(decoded.get_sender(), 123456);
+        assert_eq!(decoded.get_receiver(), 654321);
+    }
+
+    #[test]
+    fn test_string_and_number_data() {
+        let mut cv = CommunicationValue::new(CommunicationType::message);
+
+        cv.data
+            .insert(DataTypes::username, DataValue::Str("alice".into()));
+        cv.data.insert(DataTypes::user_id, DataValue::Number(99));
+
+        let decoded = roundtrip(cv.clone());
+
+        assert_eq!(
+            decoded.data.get(&DataTypes::username),
+            Some(&DataValue::Str("alice".into()))
+        );
+
+        assert_eq!(
+            decoded.data.get(&DataTypes::user_id),
+            Some(&DataValue::Number(99))
+        );
+    }
+
+    #[test]
+    fn test_bool_values() {
+        let mut cv = CommunicationValue::new(CommunicationType::update);
+
+        cv.data.insert(DataTypes::enabled, DataValue::Bool(true));
+        cv.data.insert(DataTypes::accepted, DataValue::Bool(false));
+
+        let decoded = roundtrip(cv);
+
+        assert_eq!(
+            decoded.data.get(&DataTypes::enabled),
+            Some(&DataValue::Bool(true))
+        );
+
+        assert_eq!(
+            decoded.data.get(&DataTypes::accepted),
+            Some(&DataValue::Bool(false))
+        );
+    }
+
+    #[test]
+    fn test_array_numbers() {
+        let mut cv = CommunicationValue::new(CommunicationType::messages_get);
+
+        cv.data.insert(
+            DataTypes::user_ids,
+            DataValue::Array(vec![
+                DataValue::Number(1),
+                DataValue::Number(2),
+                DataValue::Number(3),
+            ]),
+        );
+
+        let decoded = roundtrip(cv);
+
+        if let Some(DataValue::Array(arr)) = decoded.data.get(&DataTypes::user_ids) {
+            assert_eq!(arr.len(), 3);
+        } else {
+            panic!("Expected number array");
+        }
+    }
+
+    #[test]
+    fn test_nested_container() {
+        let mut inner = Vec::new();
+        inner.push((DataTypes::username, DataValue::Str("bob".into())));
+        inner.push((DataTypes::user_id, DataValue::Number(7)));
+
+        let mut cv = CommunicationValue::new(CommunicationType::user_connected);
+
+        cv.data.insert(DataTypes::user, DataValue::Container(inner));
+
+        let decoded = roundtrip(cv);
+
+        if let Some(DataValue::Container(entries)) = decoded.data.get(&DataTypes::user) {
+            assert_eq!(entries.len(), 2);
+        } else {
+            panic!("Expected container");
+        }
+    }
+
+    #[test]
+    fn test_array_of_containers() {
+        let mut container1 = Vec::new();
+        container1.push((DataTypes::username, DataValue::Str("alice".into())));
+
+        let mut container2 = Vec::new();
+        container2.push((DataTypes::username, DataValue::Str("bob".into())));
+
+        let mut cv = CommunicationValue::new(CommunicationType::error_anonymous);
+
+        cv.data.insert(
+            DataTypes::matches,
+            DataValue::Array(vec![
+                DataValue::Container(container1),
+                DataValue::Container(container2),
+            ]),
+        );
+
+        let decoded = roundtrip(cv);
+
+        if let Some(DataValue::Array(arr)) = decoded.data.get(&DataTypes::matches) {
+            assert_eq!(arr.len(), 2);
+        } else {
+            panic!("Expected container array");
+        }
+    }
+
+    #[test]
+    fn test_corrupted_input_returns_none() {
+        let corrupted = vec![0, 0, 0, 0];
+        assert!(CommunicationValue::from_bytes(&corrupted).is_none());
+    }
+
+    #[test]
+    fn test_full_complex_roundtrip() {
+        let mut cv = CommunicationValue::new(CommunicationType::message_send)
+            .with_id(999)
+            .with_sender(111)
+            .with_receiver(222);
+
+        cv.data
+            .insert(DataTypes::username, DataValue::Str("charlie".into()));
+        cv.data.insert(DataTypes::user_id, DataValue::Number(42));
+        cv.data.insert(DataTypes::enabled, DataValue::Bool(true));
+
+        let decoded = roundtrip(cv.clone());
+
+        assert_eq!(decoded.get_id(), 999);
+        assert_eq!(decoded.get_sender(), 111);
+        assert_eq!(decoded.get_receiver(), 222);
+        assert_eq!(decoded.get_type(), cv.get_type());
+        assert_eq!(decoded.data.len(), cv.data.len());
     }
 }

@@ -1,8 +1,7 @@
 [workspace]
 members = [
     "core",
-    "native",
-    "wasm"
+    "native"
 ]
 
 resolver = "2"
