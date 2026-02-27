@@ -146,7 +146,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "epsilon_native"
+name = "epsilon-native"
 version = "0.1.0"
 dependencies = [
  "anyhow",
