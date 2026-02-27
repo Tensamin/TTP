@@ -3,10 +3,10 @@ use std::collections::HashMap;
 use std::io::Cursor;
 use std::io::Read;
 
-use crate::communication::communication_types::CommunicationType;
-use crate::communication::data_container::DataKind;
-use crate::communication::data_container::DataValue;
-use crate::communication::data_types::DataTypes;
+use crate::communication_types::CommunicationType;
+use crate::data_container::DataKind;
+use crate::data_container::DataValue;
+use crate::data_types::DataTypes;
 
 #[derive(Debug, Clone)]
 pub struct CommunicationValue {
@@ -315,9 +315,9 @@ impl CommunicationValue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::communication::communication_types::CommunicationType;
-    use crate::communication::data_container::DataValue;
-    use crate::communication::data_types::DataTypes;
+    use crate::communication_types::CommunicationType;
+    use crate::data_container::DataValue;
+    use crate::data_types::DataTypes;
 
     fn roundtrip(cv: CommunicationValue) -> CommunicationValue {
         let bytes = cv.to_bytes();

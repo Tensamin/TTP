@@ -1,4 +1,4 @@
-use crate::communication::data_types::DataTypes;
+use crate::data_types::DataTypes;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

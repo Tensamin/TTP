@@ -7,4 +7,3 @@ edition = "2024"
 byteorder = "1.5.0"
 strum = "0.28.0"
 strum_macros = "0.28.0"
-uuid = {version = "1.21.0", features = ["v4"]}

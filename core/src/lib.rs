@@ -1,5 +1,9 @@
-pub mod communication;
+pub mod communication_types;
+pub mod communication_value;
+pub mod data_container;
+pub mod data_types;
 
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+pub use communication_types::CommunicationType;
+pub use communication_value::CommunicationValue;
+pub use data_container::{DataKind, DataValue};
+pub use data_types::DataTypes;
