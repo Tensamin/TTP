@@ -1,7 +1,7 @@
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 
-#[derive(PartialEq, Clone, EnumIter, Debug)]
+#[derive(PartialEq, Eq, Clone, EnumIter, Debug)]
 #[allow(non_camel_case_types, dead_code)]
 pub enum CommunicationType {
     error = 0,

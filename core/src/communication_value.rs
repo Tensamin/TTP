@@ -8,7 +8,7 @@ use crate::data_container::DataKind;
 use crate::data_container::DataValue;
 use crate::data_types::DataTypes;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommunicationValue {
     id: u32,
     comm_type: CommunicationType,
