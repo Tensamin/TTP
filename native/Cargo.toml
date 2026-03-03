@@ -5,7 +5,8 @@ edition = "2024"
 
 [dependencies]
 epsilon-core = { path = "../core" }
-quinn = { version = "0.11.9", features = ["rustls-ring", "rustls"] }
+rustls = { version = "0.23.37"}
+quinn = { version = "0.11.9", default-features = false, features = ["rustls-aws-lc-rs", "rustls"] }
 async-trait = "0.1"
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
