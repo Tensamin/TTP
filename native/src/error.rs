@@ -41,6 +41,9 @@ pub enum CommunicationError {
     #[error("ReadExactError: {0}")]
     ReadExactError(#[from] quinn::ReadExactError),
 
+    #[error("StreamClosedError")]
+    StreamClosed,
+
     #[error("Other: {0}")]
     Other(String),
 }

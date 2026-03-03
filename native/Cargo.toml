@@ -11,3 +11,6 @@ tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 bytes = "1"
 thiserror = "2.0.18"
+wtransport = "0.7.0"
+rcgen = "0.14.7"
+aws-lc-rs = "1.16.1"
