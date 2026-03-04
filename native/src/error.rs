@@ -11,6 +11,12 @@ pub enum CommunicationError {
     #[error("ParseCommunicationValue error")]
     ParseCommunicationValue,
 
+    #[error("Parse Certificate error")]
+    CertificateParseFailed,
+
+    #[error("Loading Certificate error")]
+    CertificateLoadFailed,
+
     #[error("ParseBool error: {0}")]
     ParseBool(#[from] std::str::ParseBoolError),
 
@@ -44,8 +50,11 @@ pub enum CommunicationError {
     #[error("ReadExactError: {0}")]
     ReadExactError(#[from] quinn::ReadExactError),
 
-    #[error("StreamClosedError")]
+    #[error("Stream Closed")]
     StreamClosed,
+
+    #[error("Stream Error")]
+    StreamError,
 
     #[error("Other: {0}")]
     Other(String),

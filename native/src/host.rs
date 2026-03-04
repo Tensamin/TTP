@@ -1,10 +1,6 @@
 use crate::{CommunicationError, Receiver, Sender};
-use wtransport::{
-    ClientConfig, Connection, Endpoint, Identity, RecvStream, SendStream, ServerConfig,
-};
-
-use std::net::SocketAddr;
-use std::sync::Arc;
+use rustls::{crypto::aws_lc_rs::default_provider, pki_types::pem::PemObject};
+use wtransport::{Connection, Endpoint, ServerConfig};
 
 // Server hosting using WebTransport
 pub struct Host {
@@ -18,25 +14,27 @@ impl Host {
     }
 }
 
-pub async fn host(port: u16) -> Result<Host, CommunicationError> {
-    let server_config = configure_server(port).await?;
+pub async fn host(
+    port: u16,
+    cert_pem: Vec<u8>,
+    key_pem: Vec<u8>,
+) -> Result<Host, CommunicationError> {
+    let _ = default_provider().install_default();
+
+    let server_config = configure_server(port, cert_pem, key_pem).await?;
     let endpoint = Endpoint::server(server_config)?;
 
     let (incoming_tx, incoming_rx) = tokio::sync::mpsc::channel(16);
 
     let task = tokio::spawn(async move {
-        // WebTransport server loop: accept incoming sessions
         loop {
-            // Wait for incoming session
             let incoming_session = endpoint.accept().await;
 
-            // Wait for session request (HTTP/3 upgrade negotiation)
             let incoming_request = match incoming_session.await {
                 Ok(req) => req,
                 Err(_) => continue,
             };
 
-            // Accept the WebTransport session
             let connection = match incoming_request.accept().await {
                 Ok(conn) => conn,
                 Err(_) => continue,
@@ -59,20 +57,31 @@ async fn handle_connection(
 ) {
     let sender = Sender::new(connection.clone());
     let receiver = Receiver::new(connection);
-
-    // Non-blocking send - if channel full, connection is dropped
     let _ = tx.try_send((sender, receiver));
 }
 
-async fn configure_server(port: u16) -> Result<ServerConfig, CommunicationError> {
-    // Generate self-signed identity for WebTransport
-    // In production, use Identity::load_pemfiles("cert.pem", "key.pem").await?
-    let identity = Identity::self_signed(["localhost", "127.0.0.1", "::1"])
-        .map_err(|_| CommunicationError::CertificateGenerationFailed)?;
+async fn configure_server(
+    port: u16,
+    cert_pem: Vec<u8>,
+    key_pem: Vec<u8>,
+) -> Result<ServerConfig, CommunicationError> {
+    // Parse certificate chain and private key from PEM bytes
+    let cert_chain = rustls::pki_types::CertificateDer::pem_slice_iter(&cert_pem)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| CommunicationError::CertificateLoadFailed)?;
+
+    let key = rustls::pki_types::PrivateKeyDer::try_from(key_pem)
+        .map_err(|_| CommunicationError::CertificateLoadFailed)?;
+
+    // Build custom TLS config
+    let tls_config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(cert_chain, key)
+        .map_err(|_| CommunicationError::CertificateLoadFailed)?;
 
     let server_config = ServerConfig::builder()
         .with_bind_default(port)
-        .with_identity(identity)
+        .with_custom_tls(tls_config)
         .build();
 
     Ok(server_config)
