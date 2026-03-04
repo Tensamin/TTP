@@ -18,7 +18,6 @@ pub async fn host(
     cert_pem: Vec<u8>,
     key_pem: Vec<u8>,
 ) -> Result<Host, CommunicationError> {
-    // Install crypto provider if not already installed
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let server_config = configure_server(port, cert_pem, key_pem).await?;
@@ -59,7 +58,6 @@ async fn handle_connection(
     let receiver = Receiver::new(connection);
     let _ = tx.send((sender, receiver)).await;
 }
-
 async fn configure_server(
     port: u16,
     cert_pem: Vec<u8>,
@@ -74,7 +72,7 @@ async fn configure_server(
         })?;
 
     println!("Parsing private key...");
-    let key = PrivateKeyDer::try_from(key_pem).map_err(|e| {
+    let key = PrivateKeyDer::from_pem_slice(&key_pem).map_err(|e| {
         eprintln!("Key parse error: {:?}", e);
         CommunicationError::CertificateParseFailed
     })?;
