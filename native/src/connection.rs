@@ -2,7 +2,6 @@ use crate::CommunicationError;
 use epsilon_core::CommunicationValue;
 use wtransport::Connection;
 
-
 pub const MAX_MESSAGE_SIZE: u64 = 1_000_000_000;
 
 pub struct Sender {
@@ -19,8 +18,9 @@ impl Sender {
     }
 
     pub async fn send(&self, data: &CommunicationValue) -> Result<(), CommunicationError> {
-        // Open unidirectional stream (WebTransport handles stream creation)
-        let mut stream = self.connection.open_uni().await?;
+        // open_uni() returns OpeningUniStream, await it to get SendStream
+        let opening = self.connection.open_uni().await?;
+        let mut stream = opening.await.map_err(|_| CommunicationError::StreamError)?;
 
         let bytes = data.to_bytes();
         let len = bytes.len() as u64;
@@ -29,26 +29,25 @@ impl Sender {
             return Err(CommunicationError::MessageTooLarge);
         }
 
-        // Write length prefix then data
-        // wtransport streams implement AsyncWriteExt
         use tokio::io::AsyncWriteExt;
         stream.write_u32(len as u32).await?;
-        stream.write_all(&bytes).await?;
+        let _ = stream.write_all(&bytes).await;
 
-        // Gracefully shutdown the send stream
-        stream.finish().await?;
+        // SendStream uses finish() without awaiting
+        stream
+            .finish()
+            .await
+            .map_err(|_| CommunicationError::StreamError)?;
 
         Ok(())
     }
 
     pub fn close(&self) {
-        // Close connection with error code 0
         self.connection
             .close(wtransport::VarInt::from_u32(0), b"sender closed");
     }
 }
 
-// Receiver implementation using WebTransport streams
 pub struct Receiver {
     connection: Connection,
     _phantom: std::marker::PhantomData<CommunicationValue>,
@@ -63,14 +62,13 @@ impl Receiver {
     }
 
     pub async fn receive(&self) -> Result<CommunicationValue, CommunicationError> {
-        // Accept incoming unidirectional stream
+        // accept_uni() returns RecvStream directly (not Result)
         let mut stream = self
             .connection
             .accept_uni()
             .await
-            .map_err(|e| CommunicationError::WConnectError(e));
+            .map_err(|e| CommunicationError::ConnectionError(e))?;
 
-        // Read length (u32 = 4 bytes)
         use tokio::io::AsyncReadExt;
         let len = stream.read_u32().await? as u64;
 
@@ -79,7 +77,7 @@ impl Receiver {
         }
 
         let mut buf = vec![0u8; len as usize];
-        stream.read_exact(&mut buf).await;
+        let _ = stream.read_exact(&mut buf).await;
 
         let value = CommunicationValue::from_bytes(&buf)
             .ok_or(CommunicationError::ParseCommunicationValue)?;
