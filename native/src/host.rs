@@ -1,5 +1,8 @@
 use crate::{CommunicationError, Receiver, Sender};
-use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{
+    PrivateKeyDer,
+    pem::{PemObject, SectionKind},
+};
 use wtransport::{Connection, Endpoint, ServerConfig};
 
 // Server hosting using WebTransport
@@ -55,7 +58,7 @@ async fn handle_connection(
 ) {
     let sender = Sender::new(connection.clone());
     let receiver = Receiver::new(connection);
-    let _ = tx.try_send((sender, receiver));
+    let _ = tx.send((sender, receiver)).await;
 }
 
 async fn configure_server(
@@ -63,20 +66,24 @@ async fn configure_server(
     cert_pem: Vec<u8>,
     key_pem: Vec<u8>,
 ) -> Result<ServerConfig, CommunicationError> {
-    // Parse certificate chain and private key from PEM bytes
+    println!("Parsing certificate...");
     let cert_chain = rustls::pki_types::CertificateDer::pem_slice_iter(&cert_pem)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| CommunicationError::CertificateLoadFailed)?;
 
-    let key = rustls::pki_types::PrivateKeyDer::try_from(key_pem)
-        .map_err(|_| CommunicationError::CertificateLoadFailed)?;
+    println!("Parsing private key...");
+    let key = match PrivateKeyDer::from_pem(SectionKind::PrivateKey, key_pem) {
+        Some(u) => Ok(u),
+        _ => Err(CommunicationError::CertificateParseFailed),
+    }?;
 
-    // Build custom TLS config
+    println!("Building TLS config...");
     let tls_config = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(cert_chain, key)
         .map_err(|_| CommunicationError::CertificateLoadFailed)?;
 
+    println!("Creating server config...");
     let server_config = ServerConfig::builder()
         .with_bind_default(port)
         .with_custom_tls(tls_config)
