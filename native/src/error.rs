@@ -29,10 +29,10 @@ pub enum CommunicationError {
     #[error("ParseAddr error: {0}")]
     ParseAddr(#[from] std::net::AddrParseError),
 
-    #[error("Connect error")]
+    #[error("Connection error: {0}")]
     ConnectionError(#[from] wtransport::error::ConnectionError),
 
-    #[error("Connect error")]
+    #[error("Connecting error: {0}")]
     ConnectingError(#[from] wtransport::error::ConnectingError),
 
     #[error("ReadToEnd error")]
