@@ -21,7 +21,8 @@ pub async fn host(
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let server_config = configure_server(port, cert_pem, key_pem).await?;
-    let endpoint = Endpoint::server(server_config)?;
+    let endpoint = Endpoint::server(server_config)
+        .map_err(|e| CommunicationError::Other(format!("Endpoint creation failed: {}", e)))?;
 
     let (incoming_tx, incoming_rx) = tokio::sync::mpsc::channel(16);
 
@@ -29,15 +30,26 @@ pub async fn host(
         loop {
             let incoming_session = endpoint.accept().await;
 
-            let incoming_request = match incoming_session.await {
+            let request = match incoming_session.await {
                 Ok(req) => req,
-                Err(_) => continue,
+                Err(e) => {
+                    eprintln!("Session accept error: {:?}", e);
+                    continue;
+                }
             };
 
-            let connection = match incoming_request.accept().await {
+            println!("New WebTransport request from: {:?}", request.authority());
+            println!("Path: {:?}", request.path());
+
+            let connection = match request.accept().await {
                 Ok(conn) => conn,
-                Err(_) => continue,
+                Err(e) => {
+                    eprintln!("WebTransport accept error: {:?}", e);
+                    continue;
+                }
             };
+
+            println!("WebTransport connection established!");
 
             let incoming_tx = incoming_tx.clone();
             tokio::spawn(handle_connection(connection, incoming_tx));
@@ -64,38 +76,20 @@ async fn configure_server(
     cert_pem: Vec<u8>,
     key_pem: Vec<u8>,
 ) -> Result<ServerConfig, CommunicationError> {
-    println!("Parsing certificate...");
     let cert_chain = rustls::pki_types::CertificateDer::pem_slice_iter(&cert_pem)
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| {
-            eprintln!("Certificate parse error: {:?}", e);
-            CommunicationError::CertificateLoadFailed
-        })?;
+        .map_err(|_| CommunicationError::CertificateLoadFailed)?;
 
-    println!("Parsing private key...");
-    let key = PrivateKeyDer::from_pem_slice(&key_pem).map_err(|e| {
-        eprintln!("Key parse error: {:?}", e);
-        CommunicationError::CertificateParseFailed
-    })?;
-
-    println!("Building TLS config...");
+    let key = PrivateKeyDer::from_pem_slice(&key_pem)
+        .map_err(|_| CommunicationError::CertificateParseFailed)?;
 
     let mut tls_config = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(cert_chain, key)
-        .map_err(|e| {
-            eprintln!("TLS config error: {:?}", e);
-            CommunicationError::CertificateLoadFailed
-        })?;
+        .map_err(|_| CommunicationError::CertificateLoadFailed)?;
 
-    tls_config.alpn_protocols = vec![
-        b"h3".to_vec(),
-        b"h3-29".to_vec(),
-        b"h3-28".to_vec(),
-        b"h3-27".to_vec(),
-    ];
+    tls_config.alpn_protocols = vec![b"h3".to_vec()];
 
-    println!("Creating server config...");
     let server_config = ServerConfig::builder()
         .with_bind_default(port)
         .with_custom_tls(tls_config)

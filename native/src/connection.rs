@@ -18,7 +18,6 @@ impl Sender {
     }
 
     pub async fn send(&self, data: &CommunicationValue) -> Result<(), CommunicationError> {
-        // open_uni() returns OpeningUniStream, await it to get SendStream
         let opening = self.connection.open_uni().await?;
         let mut stream = opening.await.map_err(|_| CommunicationError::StreamError)?;
 
