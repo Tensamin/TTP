@@ -58,6 +58,7 @@ async fn handle_connection(
     let receiver = Receiver::new(connection);
     let _ = tx.send((sender, receiver)).await;
 }
+
 async fn configure_server(
     port: u16,
     cert_pem: Vec<u8>,
@@ -78,13 +79,21 @@ async fn configure_server(
     })?;
 
     println!("Building TLS config...");
-    let tls_config = rustls::ServerConfig::builder()
+
+    let mut tls_config = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(cert_chain, key)
         .map_err(|e| {
             eprintln!("TLS config error: {:?}", e);
             CommunicationError::CertificateLoadFailed
         })?;
+
+    tls_config.alpn_protocols = vec![
+        b"h3".to_vec(),
+        b"h3-29".to_vec(),
+        b"h3-28".to_vec(),
+        b"h3-27".to_vec(),
+    ];
 
     println!("Creating server config...");
     let server_config = ServerConfig::builder()

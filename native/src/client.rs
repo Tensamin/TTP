@@ -1,7 +1,7 @@
-use rustls::pki_types::pem::PemObject;
-use wtransport::{ClientConfig, Connection, Endpoint};
-
 use crate::{CommunicationError, Receiver, Sender};
+use rustls::pki_types::pem::PemObject;
+use rustls::{ClientConfig as RustlsClientConfig, RootCertStore};
+use wtransport::{ClientConfig, Connection, Endpoint};
 
 pub async fn connect(
     url: &str,
@@ -23,7 +23,6 @@ pub async fn connect(
 
     Ok((sender, receiver))
 }
-use rustls::{ClientConfig as RustlsClientConfig, RootCertStore};
 
 fn configure_client(server_cert: Vec<u8>) -> Result<ClientConfig, CommunicationError> {
     let mut root_store = RootCertStore::empty();
@@ -36,9 +35,16 @@ fn configure_client(server_cert: Vec<u8>) -> Result<ClientConfig, CommunicationE
         .add(cert)
         .map_err(|_| CommunicationError::CertificateParseFailed)?;
 
-    let tls_config = RustlsClientConfig::builder()
+    let mut tls_config = RustlsClientConfig::builder()
         .with_root_certificates(root_store)
         .with_no_client_auth();
+
+    tls_config.alpn_protocols = vec![
+        b"h3".to_vec(),
+        b"h3-29".to_vec(),
+        b"h3-28".to_vec(),
+        b"h3-27".to_vec(),
+    ];
 
     let client_config = ClientConfig::builder()
         .with_bind_default()
