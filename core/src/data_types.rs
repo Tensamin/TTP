@@ -118,6 +118,7 @@ impl DataTypes {
             | DataTypes::start_date
             | DataTypes::end_date
             | DataTypes::omikron_id
+            | DataTypes::send_time
             | DataTypes::sub_level => DataKind::Number,
 
             DataTypes::error_type
@@ -162,7 +163,6 @@ impl DataTypes {
             | DataTypes::last_ping
             | DataTypes::ping_iota
             | DataTypes::get_time
-            | DataTypes::send_time
             | DataTypes::omikron_connections => DataKind::Array(Box::new(DataKind::Number)),
 
             DataTypes::settings
@@ -189,6 +189,7 @@ impl DataTypes {
             DataTypes::want_to_watch => DataKind::Null,
             DataTypes::watcher => DataKind::Null,
             DataTypes::created_at => DataKind::Null,
+
             DataTypes::status => DataKind::Null,
             DataTypes::sub_end => DataKind::Null,
 
@@ -227,6 +228,8 @@ impl DataTypes {
 
 #[cfg(test)]
 mod tests {
+    use crate::CommunicationType;
+
     use super::*;
 
     #[test]
@@ -273,5 +276,230 @@ mod tests {
     fn test_to_string_matches_debug() {
         let datatype = DataTypes::call_id;
         assert_eq!(datatype.to_string(), "call_id");
+    }
+
+    #[test]
+    fn test_all_types_have_expected_kind() {
+        for data_type in DataTypes::iter() {
+            let _kind = data_type.expected_kind();
+        }
+    }
+
+    #[test]
+    fn test_expected_kind_number_types() {
+        let number_types = vec![
+            DataTypes::user_id,
+            DataTypes::sender_id,
+            DataTypes::receiver_id,
+            DataTypes::call_id,
+            DataTypes::amount,
+            DataTypes::offset,
+            DataTypes::iota_id,
+        ];
+
+        for t in number_types {
+            assert_eq!(
+                t.expected_kind(),
+                DataKind::Number,
+                "{:?} should be Number",
+                t
+            );
+        }
+    }
+
+    #[test]
+    fn test_expected_kind_string_types() {
+        let string_types = vec![
+            DataTypes::username,
+            DataTypes::message,
+            DataTypes::content,
+            DataTypes::public_key,
+            DataTypes::uuid,
+        ];
+
+        for t in string_types {
+            assert_eq!(t.expected_kind(), DataKind::Str, "{:?} should be Str", t);
+        }
+    }
+
+    #[test]
+    fn test_expected_kind_bool_types() {
+        let bool_types = vec![
+            DataTypes::enabled,
+            DataTypes::accepted,
+            DataTypes::signed,
+            DataTypes::has_admin,
+            DataTypes::screen_share,
+        ];
+
+        for t in bool_types {
+            assert_eq!(t.expected_kind(), DataKind::Bool, "{:?} should be Bool", t);
+        }
+    }
+
+    #[test]
+    fn test_expected_kind_container_types() {
+        let container_types = vec![
+            DataTypes::settings,
+            DataTypes::user,
+            DataTypes::payload,
+            DataTypes::result,
+        ];
+
+        for t in container_types {
+            assert_eq!(
+                t.expected_kind(),
+                DataKind::Container,
+                "{:?} should be Container",
+                t
+            );
+        }
+    }
+
+    #[test]
+    fn test_expected_kind_array_types() {
+        match DataTypes::user_ids.expected_kind() {
+            DataKind::Array(inner) => assert_eq!(*inner, DataKind::Number),
+            _ => panic!("user_ids should be Array<Number>"),
+        }
+
+        match DataTypes::messages.expected_kind() {
+            DataKind::Array(inner) => assert_eq!(*inner, DataKind::Container),
+            _ => panic!("messages should be Array<Container>"),
+        }
+    }
+
+    #[test]
+    fn test_as_number_consistency() {
+        assert_eq!(DataTypes::error_type.as_number(), 0);
+        assert_eq!(DataTypes::error_protocol.as_number(), 1);
+        assert_eq!(DataTypes::accepted_ids.as_number(), 2);
+    }
+
+    #[test]
+    fn test_from_number_boundary() {
+        assert_eq!(DataTypes::from_number(0), DataTypes::error_type);
+        let max_index = DataTypes::iter().count() as u8 - 1;
+        assert_ne!(DataTypes::from_number(max_index), DataTypes::error_protocol);
+
+        assert_eq!(
+            DataTypes::from_number(max_index + 1),
+            DataTypes::error_protocol
+        );
+    }
+
+    #[test]
+    fn test_parse_variations() {
+        assert_eq!(DataTypes::parse("user_id".to_string()), DataTypes::user_id);
+        assert_eq!(DataTypes::parse("userId".to_string()), DataTypes::user_id);
+        assert_eq!(DataTypes::parse("User_Id".to_string()), DataTypes::user_id);
+        assert_eq!(DataTypes::parse("USERID".to_string()), DataTypes::user_id);
+    }
+
+    #[test]
+    fn test_to_string_format() {
+        let s = DataTypes::call_id.to_string();
+        assert!(!s.contains('"'));
+        assert!(!s.contains(' '));
+        assert!(s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
+    }
+
+    #[test]
+    fn test_clone_equality() {
+        let original = DataTypes::user_id;
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
+    }
+
+    #[test]
+    fn test_ord_sorting() {
+        let mut types: Vec<DataTypes> = vec![
+            DataTypes::user_id,
+            DataTypes::error_type,
+            DataTypes::username,
+        ];
+        types.sort();
+
+        assert_eq!(types[0], DataTypes::error_type);
+        assert_eq!(types[1], DataTypes::user_id);
+        assert_eq!(types[2], DataTypes::username);
+    }
+
+    #[test]
+    fn test_communication_type_as_number_matches_position() {
+        for (idx, comm_type) in CommunicationType::iter().enumerate() {
+            assert_eq!(comm_type.as_number() as usize, idx);
+        }
+    }
+
+    #[test]
+    fn test_communication_type_roundtrip_all() {
+        for comm_type in CommunicationType::iter() {
+            let num = comm_type.as_number();
+            let reconstructed = CommunicationType::from_number(num);
+            assert_eq!(comm_type, reconstructed);
+        }
+    }
+
+    #[test]
+    fn test_communication_type_parse_all() {
+        for comm_type in CommunicationType::iter() {
+            let name = comm_type.to_string();
+            let parsed = CommunicationType::parse(name);
+            assert_eq!(comm_type, parsed);
+        }
+    }
+
+    #[test]
+    fn test_communication_type_parse_invalid() {
+        assert_eq!(
+            CommunicationType::parse("nonexistent".to_string()),
+            CommunicationType::error_protocol
+        );
+        assert_eq!(
+            CommunicationType::parse("".to_string()),
+            CommunicationType::error_protocol
+        );
+    }
+
+    #[test]
+    fn test_data_types_count() {
+        let count = DataTypes::iter().count();
+        assert!(count > 80, "Expected many DataTypes, got {}", count);
+    }
+
+    #[test]
+    fn test_communication_types_count() {
+        let count = CommunicationType::iter().count();
+        assert!(
+            count > 85,
+            "Expected many CommunicationTypes, got {}",
+            count
+        );
+    }
+
+    #[test]
+    fn test_error_types_grouped() {
+        assert_eq!(DataTypes::error_type.as_number(), 0);
+        assert_eq!(DataTypes::error_protocol.as_number(), 1);
+
+        assert_eq!(CommunicationType::error.as_number(), 0);
+        assert_eq!(CommunicationType::error_protocol.as_number(), 1);
+    }
+
+    #[test]
+    fn test_null_kinds_are_consistent() {
+        let null_types = vec![
+            DataTypes::error_protocol,
+            DataTypes::accepted_profiles,
+            DataTypes::denied_profiles,
+            DataTypes::get_variant,
+            DataTypes::omikron,
+            DataTypes::interactables,
+        ];
+
+        for t in null_types {
+            assert_eq!(t.expected_kind(), DataKind::Null, "{:?} should be Null", t);
+        }
     }
 }
