@@ -35,13 +35,13 @@ pub enum CommunicationError {
     #[error("Connecting error: {0}")]
     ConnectingError(#[from] wtransport::error::ConnectingError),
 
-    #[error("ReadToEnd error")]
+    #[error("ReadToEnd error: {0}")]
     ReadToEndError(#[from] quinn::ReadToEndError),
 
-    #[error("Write error")]
+    #[error("Write error: {0}")]
     WriteError(#[from] quinn::WriteError),
 
-    #[error("Closed error")]
+    #[error("Closed error: {0}")]
     ClosedError(#[from] quinn::ClosedStream),
 
     #[error("Message too large")]
@@ -55,6 +55,12 @@ pub enum CommunicationError {
 
     #[error("Stream Error")]
     StreamError,
+
+    #[error("Stream Error: {0}")]
+    StreamWriteError(#[from] wtransport::error::StreamWriteError),
+
+    #[error("Read Exact Error: {0}")]
+    StreamReadExactError(#[from] wtransport::error::StreamReadExactError),
 
     #[error("Crypto Provider Install Error")]
     CryptoProviderInstallFailed,
