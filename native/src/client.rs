@@ -25,11 +25,12 @@ pub async fn connect(
     let connection = endpoint
         .connect(url)
         .await
-        .map_err(|e| CommunicationError::ConnectingError(e))?;
+        .map_err(|e| CommunicationError::ConnectingError(e.to_string()))?;
 
     println!("Connected successfully!");
 
     let handle = Arc::new(ConnectionHandle::new());
+
     let sender = Sender::new(connection.clone(), handle.clone());
     let receiver = Receiver::new(connection, handle);
 

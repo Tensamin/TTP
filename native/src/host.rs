@@ -1,11 +1,8 @@
-use std::sync::Arc;
-
+use crate::{CommunicationError, ConnectionHandle, Receiver, Sender};
 use rustls::pki_types::{PrivateKeyDer, pem::PemObject};
+use std::sync::Arc;
 use wtransport::{Connection as WTConnection, Endpoint, ServerConfig};
 
-use crate::{CommunicationError, ConnectionHandle, Receiver, Sender};
-
-/// Host for accepting incoming connections
 pub struct Host {
     incoming: tokio::sync::mpsc::Receiver<(Sender, Receiver)>,
     _task: tokio::task::JoinHandle<()>,
@@ -71,6 +68,7 @@ async fn handle_connection(
     tx: tokio::sync::mpsc::Sender<(Sender, Receiver)>,
 ) {
     let handle = Arc::new(ConnectionHandle::new());
+
     let sender = Sender::new(connection.clone(), handle.clone());
     let receiver = Receiver::new(connection, handle);
     let _ = tx.send((sender, receiver)).await;

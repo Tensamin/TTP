@@ -4,19 +4,17 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-rcgen = "0.14.7"
 epsilon-core = { path = "../core" }
-wtransport = { version = "0.7.0", default-features = false, features = ["aws-lc-rs", "quinn", "self-signed"] }
+wtransport = { version = "0.7.0", default-features = false, features = [
+    "aws-lc-rs",
+    "quinn",
+    "self-signed",
+] }
 rustls = { version = "0.23.37" }
 quinn = { version = "0.11.9", default-features = false, features = [
     "rustls-aws-lc-rs",
     "rustls",
 ] }
-async-trait = "0.1"
 tokio = { version = "1", features = ["full"] }
-anyhow = "1"
-bytes = "1"
 thiserror = "2.0.18"
-aws-lc-rs = "1.16.1"
-wtransport-proto = { version = "0.7.0", features = ["async"] }
 rustls-native-certs = "0.8.3"

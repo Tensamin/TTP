@@ -1,12 +1,9 @@
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone)]
 pub enum CommunicationError {
     #[error("QUIC error: {0}")]
     Quinn(#[from] quinn::ConnectionError),
-
-    #[error("Tokio IO error: {0}")]
-    TokioIo(#[from] tokio::io::Error),
 
     #[error("ParseCommunicationValue error")]
     ParseCommunicationValue,
@@ -33,7 +30,7 @@ pub enum CommunicationError {
     ConnectionError(#[from] wtransport::error::ConnectionError),
 
     #[error("Connecting error: {0}")]
-    ConnectingError(#[from] wtransport::error::ConnectingError),
+    ConnectingError(String),
 
     #[error("ReadToEnd error: {0}")]
     ReadToEndError(#[from] quinn::ReadToEndError),
