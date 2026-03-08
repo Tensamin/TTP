@@ -1,7 +1,9 @@
+use std::sync::Arc;
+
 use rustls::{ClientConfig as RustlsClientConfig, RootCertStore, pki_types::pem::PemObject};
 use wtransport::{ClientConfig, Endpoint};
 
-use crate::{CommunicationError, Receiver, Sender};
+use crate::{CommunicationError, ConnectionHandle, Receiver, Sender};
 
 pub async fn connect(
     url: &str,
@@ -27,8 +29,9 @@ pub async fn connect(
 
     println!("Connected successfully!");
 
-    let sender = Sender::new(connection.clone());
-    let receiver = Receiver::new(connection);
+    let handle = Arc::new(ConnectionHandle::new());
+    let sender = Sender::new(connection.clone(), handle.clone());
+    let receiver = Receiver::new(connection, handle);
 
     Ok((sender, receiver))
 }
