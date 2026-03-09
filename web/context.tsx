@@ -9,10 +9,14 @@ import {
   useContext,
   type ParentProps,
 } from "solid-js";
-import { z } from "zod";
 
-import { createPendingRequests, type TypedMessage } from "./send";
-import { RETRY_COUNT, RETRY_INTERVAL, PING_INTERVAL } from "./values";
+import { createTransportClient, READY_STATE, type BoundSendFn } from "./core";
+import {
+  PING_INTERVAL,
+  RETRY_COUNT,
+  RETRY_INTERVAL,
+  TRANSPORT_URL,
+} from "./values";
 import {
   socket as schemas,
   type Socket as Schemas,
@@ -22,22 +26,6 @@ import { useCrypto } from "@tensamin/core-crypto/context";
 import Loading from "@tensamin/ui/screens/loading";
 import ErrorScreen from "@tensamin/ui/screens/error";
 import { useNavigate } from "@solidjs/router";
-
-type SchemaMap = Record<string, { request: z.ZodType; response: z.ZodType }>;
-
-type BoundSendFn<T extends SchemaMap> = {
-  <K extends keyof T & string>(
-    type: K,
-    data: z.input<T[K]["request"]>,
-    options: { id?: string; noResponse: true },
-  ): Promise<void>;
-
-  <K extends keyof T & string>(
-    type: K,
-    data: z.input<T[K]["request"]>,
-    options?: { id?: string; noResponse?: false },
-  ): Promise<TypedMessage<z.output<T[K]["response"]>>>;
-};
 
 type OmikronData = {
   id: number;
@@ -55,11 +43,8 @@ type ContextType = {
 const socketContext = createContext<ContextType>();
 
 export default function Provider(props: ParentProps) {
-  const pending = createPendingRequests(schemas);
-
   const [omikron, setOmikron] = createSignal<OmikronData | null>(null);
-  const [url, setUrl] = createSignal<string | null>(null);
-  const [readyState, setReadyState] = createSignal<number>(WebSocket.CLOSED);
+  const [readyState, setReadyState] = createSignal<number>(READY_STATE.CLOSED);
   const [identified, setIdentified] = createSignal<boolean>(false);
 
   const [ownPing, setOwnPing] = createSignal<number>(0);
@@ -73,7 +58,7 @@ export default function Provider(props: ParentProps) {
 
   const navigate = useNavigate();
 
-  let ws: WebSocket | null = null;
+  let client: ReturnType<typeof createTransportClient<Schemas>> | null = null;
 
   // Load Omikron
   createEffect(() => {
@@ -97,7 +82,6 @@ export default function Provider(props: ParentProps) {
         );
         const data = await res.json();
         setOmikron(data);
-        setUrl(data.ip_address + "/ws/client/");
       } catch (e) {
         if (controller.signal.aborted) return;
 
@@ -115,43 +99,77 @@ export default function Provider(props: ParentProps) {
   createEffect(() => {
     if (identified()) {
       const interval = setInterval(async () => {
-        const originalNow = Date.now();
+        try {
+          const originalNow = Date.now();
 
-        const data = await send("ping", {
-          last_ping: originalNow,
-        });
+          const data = await send("ping", {
+            last_ping: originalNow,
+          });
 
-        const travelTime = Date.now() - originalNow;
+          const travelTime = Date.now() - originalNow;
 
-        setOwnPing(travelTime);
-        setIotaPing(data.data.ping_iota);
+          setOwnPing(travelTime);
+          setIotaPing(data.data.ping_iota);
+        } catch (error) {
+          log(1, "Socket", "yellow", "Ping failed", error);
+        }
       }, PING_INTERVAL);
 
       onCleanup(() => clearInterval(interval));
     }
   });
 
-  // Create WebSocket with reconnection
+  // Create connection
   createEffect(() => {
-    const currentUrl = url();
-    if (!currentUrl) return;
+    if (!omikron()) return;
 
     let attempts = 0;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let disposed = false;
 
-    async function identify() {
+    const transportClient = createTransportClient(schemas, {
+      url: TRANSPORT_URL,
+      onReadyStateChange: setReadyState,
+      onClose: ({ error: closeError, intentional }) => {
+        setIdentified(false);
+
+        if (disposed || intentional) {
+          return;
+        }
+
+        log(0, "Socket", "red", "Disconnected", closeError);
+
+        if (attempts < RETRY_COUNT) {
+          attempts += 1;
+          reconnectTimer = setTimeout(() => {
+            void connect();
+          }, RETRY_INTERVAL);
+          return;
+        }
+
+        setError("Connection Failed");
+        setErrorDescription(
+          "Unable to connect to the server after multiple attempts. Please check your internet connection or try again later.",
+        );
+        log(0, "Socket", "red", "Reconnection attempts exhausted", closeError);
+      },
+    });
+
+    client = transportClient;
+
+    async function identify(activeClient: typeof transportClient) {
       const userId = await load("user_id");
       const privateKey = await load("private_key");
-      const omikronData = untrack(() => omikron());
+      const currentOmikron = untrack(() => omikron());
 
-      send("identification", { user_id: userId })
+      activeClient
+        .send("identification", { user_id: userId })
         .then(async (data) => {
-          const ownUserData = await send("get_user_data", {
+          const ownUserData = await activeClient.send("get_user_data", {
             user_id: userId,
           });
 
-          if (!omikronData?.public_key) {
+          if (!currentOmikron?.public_key) {
             setError("Omikron data missing");
             setErrorDescription(
               "Omikron server data is missing. Please try again later.",
@@ -164,7 +182,7 @@ export default function Provider(props: ParentProps) {
             const sharedSecret = await get_shared_secret(
               privateKey,
               ownUserData.data.public_key,
-              omikronData.public_key,
+              currentOmikron.public_key,
             );
 
             const solvedChallenge = await decrypt(
@@ -172,10 +190,15 @@ export default function Provider(props: ParentProps) {
               data.data.challenge,
             );
 
-            send("challenge_response", {
-              challenge: btoa(solvedChallenge),
-            })
+            activeClient
+              .send("challenge_response", {
+                challenge: btoa(solvedChallenge),
+              })
               .then(() => {
+                if (client !== activeClient || disposed) {
+                  return;
+                }
+
                 log(1, "Socket", "green", "Identification successful");
                 setIdentified(true);
                 setError("");
@@ -205,63 +228,31 @@ export default function Provider(props: ParentProps) {
         });
     }
 
-    function connect() {
+    async function connect() {
       if (disposed) return;
 
-      const socket = new WebSocket(currentUrl!);
-
-      socket.onopen = () => {
-        log(1, "Socket", "green", "Connected");
+      try {
+        await transportClient.connect(TRANSPORT_URL);
         attempts = 0;
-        setReadyState(WebSocket.OPEN);
-        identify();
-      };
-
-      socket.onclose = () => {
-        log(0, "Socket", "red", "Disconnected");
-        setReadyState(WebSocket.CLOSED);
-        pending.cleanup();
-
-        if (disposed) return;
-
-        if (attempts < RETRY_COUNT) {
-          attempts++;
-          reconnectTimer = setTimeout(connect, RETRY_INTERVAL);
-        } else {
-          setError("Connection Failed");
-          setErrorDescription(
-            "Unable to connect to the server after multiple attempts. Please check your internet connection or try again later.",
-          );
-          log(0, "Socket", "red", "Reconnection attempts exhausted");
+        await identify(transportClient);
+      } catch (error) {
+        if (!disposed) {
+          log(0, "Socket", "red", "Connection attempt failed", error);
         }
-      };
-
-      socket.onerror = (e) => {
-        setError("Connection Error");
-        setErrorDescription(
-          "An error occurred with the WebSocket connection. Please check your internet connection or try again later.",
-        );
-        log(0, "Socket", "red", "WebSocket error", e);
-      };
-
-      socket.onmessage = (event) => {
-        pending.handleMessage(event);
-      };
-
-      ws = socket;
-      setReadyState(WebSocket.CONNECTING);
+      }
     }
 
-    connect();
+    void connect();
 
     onCleanup(() => {
       disposed = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
-      if (ws) {
-        ws.close();
-        ws = null;
+      if (client === transportClient) {
+        client = null;
       }
-      setReadyState(WebSocket.CLOSED);
+      void transportClient.close("context-dispose");
+      setReadyState(READY_STATE.CLOSED);
+      setIdentified(false);
     });
   });
 
@@ -269,31 +260,27 @@ export default function Provider(props: ParentProps) {
   const send: BoundSendFn<Schemas> = ((
     type: string,
     data?: Record<string, unknown>,
-    options?: { id?: string; noResponse?: boolean },
-  ): Promise<TypedMessage> | Promise<void> => {
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      return Promise.reject(
-        new Error("Socket is not connected"),
-      ) as Promise<TypedMessage>;
+    options?: { id?: number; noResponse?: boolean },
+  ) => {
+    if (!client) {
+      return Promise.reject(new Error("Socket is not connected"));
     }
 
     if (options?.noResponse) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      return pending.send(ws, type as keyof Schemas & string, data as any, {
+      return client.send(type as keyof Schemas & string, data as never, {
         ...options,
         noResponse: true,
       });
     }
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return pending.send(ws, type as keyof Schemas & string, data as any, {
+    return client.send(type as keyof Schemas & string, data as never, {
       ...options,
       noResponse: false,
     });
-  }) as unknown as BoundSendFn<Schemas>;
+  }) as BoundSendFn<Schemas>;
 
   const progress = () => {
     if (!omikron()) return 40;
-    if (!url()) return 70;
+    if (readyState() !== READY_STATE.OPEN) return 70;
     if (!identified()) return 90;
     return 100;
   };
@@ -306,7 +293,7 @@ export default function Provider(props: ParentProps) {
       }
     >
       <Show
-        when={omikron() && url() && identified()}
+        when={omikron() && identified()}
         fallback={<Loading progress={progress()} />}
       >
         <socketContext.Provider value={{ send, readyState, ownPing, iotaPing }}>
