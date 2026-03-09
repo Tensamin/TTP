@@ -473,6 +473,7 @@ dependencies = [
 name = "epsilon-core"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "byteorder",
  "rand 0.8.5",
  "strum 0.28.0",

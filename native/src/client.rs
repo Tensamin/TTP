@@ -20,14 +20,10 @@ pub async fn connect(
     let endpoint = Endpoint::client(client_config)
         .map_err(|e| CommunicationError::Other(format!("Endpoint creation failed: {}", e)))?;
 
-    println!("Connecting to: {}", url);
-
     let connection = endpoint
         .connect(url)
         .await
         .map_err(|e| CommunicationError::ConnectingError(e.to_string()))?;
-
-    println!("Connected successfully!");
 
     let handle = Arc::new(ConnectionHandle::new());
 

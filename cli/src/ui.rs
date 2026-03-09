@@ -36,7 +36,7 @@ pub struct CommToBinaryApp {
     scroll_offset: usize,
     show_help: bool,
     generated_bytes: Option<Vec<u8>>,
-    status_message: Option<String>, // Added for feedback
+    status_message: Option<String>,
 }
 
 impl CommToBinaryApp {

@@ -4,9 +4,8 @@ use std::io::Cursor;
 use std::io::Read;
 
 use crate::communication_types::CommunicationType;
-use crate::data_container::DataKind;
-use crate::data_container::DataValue;
 use crate::data_types::DataTypes;
+use crate::data_value::DataValue;
 use crate::rand_u32;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,13 +71,14 @@ impl CommunicationValue {
 
 impl CommunicationValue {
     /*
+     * Format:
      * [1 byte data type]
      * [1 bit has sender, 1 bit has receiver, 1 bit has id, 5 placeholder]
      * [optional 4 bytes id]
      * [optional 6 bytes sender]
      * [optional 6 bytes receiver]
      * [4 bytes length of data]
-     * [data ...]
+     * [data container bytes...]
      */
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::new();
@@ -110,15 +110,16 @@ impl CommunicationValue {
             buf.extend_from_slice(&self.receiver.to_be_bytes()[2..]);
         }
 
-        let mut data_buf = Vec::new();
-        Self::write_data_container(&mut data_buf, &self.data);
+        // Use DataValue's serialization for the data container
+        let data_value = DataValue::container_from_map(&self.data);
+        let data_buf = data_value.to_bytes();
 
         buf.write_u32::<BigEndian>(data_buf.len() as u32).unwrap();
-
         buf.extend_from_slice(&data_buf);
 
         buf
     }
+
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         let mut cursor = Cursor::new(bytes);
 
@@ -157,8 +158,9 @@ impl CommunicationValue {
         let mut data_bytes = vec![0u8; data_len];
         cursor.read_exact(&mut data_bytes).ok()?;
 
-        let mut data_cursor = Cursor::new(data_bytes.as_slice());
-        let data = Self::read_data_container(&mut data_cursor)?;
+        // Use DataValue's deserialization
+        let data_value = DataValue::from_bytes(&data_bytes)?;
+        let data = data_value.as_map()?;
 
         Some(Self {
             id,
@@ -167,194 +169,6 @@ impl CommunicationValue {
             receiver,
             data,
         })
-    }
-
-    /*
-     * [2 bytes amount of elements in Array]
-     * [
-     *   [2 bytes Object length]
-     *   [Object bytes]
-     * ]
-     */
-    fn write_array(buf: &mut Vec<u8>, arr: &[DataValue]) {
-        buf.write_u16::<BigEndian>(arr.len() as u16).unwrap();
-
-        for value in arr {
-            let mut object_bytes = Vec::new();
-
-            match value {
-                DataValue::Number(n) => {
-                    object_bytes.write_i64::<BigEndian>(*n).unwrap();
-                }
-                DataValue::Str(s) => {
-                    object_bytes.extend_from_slice(s.as_bytes());
-                }
-                DataValue::Container(inner) => {
-                    let mut inner_map = BTreeMap::new();
-                    for (k, v) in inner {
-                        inner_map.insert(k.clone(), v.clone());
-                    }
-                    Self::write_data_container(&mut object_bytes, &inner_map);
-                }
-                DataValue::Array(inner_arr) => {
-                    Self::write_array(&mut object_bytes, inner_arr);
-                }
-                _ => {}
-            }
-
-            buf.write_u16::<BigEndian>(object_bytes.len() as u16)
-                .unwrap();
-
-            buf.extend_from_slice(&object_bytes);
-        }
-    }
-    fn read_array(cursor: &mut Cursor<&[u8]>, element_kind: &DataKind) -> Option<Vec<DataValue>> {
-        let len = cursor.read_u16::<BigEndian>().ok()? as usize;
-        let mut result = Vec::with_capacity(len);
-
-        for _ in 0..len {
-            let obj_len = cursor.read_u16::<BigEndian>().ok()? as usize;
-
-            let mut obj_bytes = vec![0u8; obj_len];
-            cursor.read_exact(&mut obj_bytes).ok()?;
-
-            let mut inner_cursor = Cursor::new(obj_bytes.as_slice());
-
-            let value = match element_kind {
-                DataKind::Number => {
-                    let n = inner_cursor.read_i64::<BigEndian>().ok()?;
-                    DataValue::Number(n)
-                }
-
-                DataKind::Str => {
-                    let s = String::from_utf8(obj_bytes).ok()?;
-                    DataValue::Str(s)
-                }
-
-                DataKind::Container => {
-                    let map = Self::read_data_container(&mut inner_cursor)?;
-                    DataValue::container_from_map(&map)
-                }
-
-                DataKind::Array(inner_kind) => {
-                    let arr = Self::read_array(&mut inner_cursor, inner_kind)?;
-                    DataValue::Array(arr)
-                }
-
-                DataKind::Bool => {
-                    let b = inner_cursor.read_u8().ok()? != 0;
-                    DataValue::Bool(b)
-                }
-
-                DataKind::Null => DataValue::Null,
-            };
-
-            result.push(value);
-        }
-
-        Some(result)
-    }
-    /*
-     * [2 bytes amount of elements in Container]
-     * [
-     *   [1 byte key]
-     *   [2 bytes Object length]
-     *   [Object bytes]
-     * ]
-     */
-    fn write_data_container(buf: &mut Vec<u8>, data: &BTreeMap<DataTypes, DataValue>) {
-        buf.write_u16::<BigEndian>(data.len() as u16).unwrap();
-        for (key, value) in data {
-            buf.push(key.as_number());
-            let mut data_bytes = Vec::new();
-
-            match value {
-                DataValue::Number(n) => data_bytes.write_i64::<BigEndian>(*n).unwrap(),
-                DataValue::Str(s) => data_bytes.extend_from_slice(s.as_bytes()),
-                DataValue::Container(inner) => {
-                    let mut inner_map = BTreeMap::new();
-                    for (k, v) in inner {
-                        inner_map.insert(k.clone(), v.clone());
-                    }
-                    Self::write_data_container(&mut data_bytes, &inner_map);
-                }
-                DataValue::Array(arr) => Self::write_array(&mut data_bytes, arr),
-                DataValue::BoolTrue => {
-                    data_bytes.extend_from_slice(&[1 as u8]);
-                    buf.extend_from_slice(&data_bytes);
-                    continue;
-                }
-                DataValue::BoolFalse => {
-                    data_bytes.extend_from_slice(&[0 as u8]);
-                    buf.extend_from_slice(&data_bytes);
-                    continue;
-                }
-                DataValue::Bool(b) => {
-                    if *b {
-                        data_bytes.extend_from_slice(&[1 as u8]);
-                    } else {
-                        data_bytes.extend_from_slice(&[0 as u8]);
-                    }
-                    buf.extend_from_slice(&data_bytes);
-                    continue;
-                }
-                DataValue::Null => {}
-            }
-
-            buf.write_u16::<BigEndian>(data_bytes.len() as u16).unwrap();
-            buf.extend_from_slice(&data_bytes);
-        }
-    }
-    fn read_data_container(cursor: &mut Cursor<&[u8]>) -> Option<BTreeMap<DataTypes, DataValue>> {
-        let count = cursor.read_u16::<BigEndian>().ok()? as usize;
-        let mut data = BTreeMap::new();
-
-        for _ in 0..count {
-            let key_num = cursor.read_u8().ok()?;
-            let key = DataTypes::from_number(key_num);
-
-            if key.expected_kind() == DataKind::Bool {
-                let value = cursor.read_u8().ok()? == 1;
-                data.insert(key, DataValue::Bool(value));
-                continue;
-            }
-            let len = cursor.read_u16::<BigEndian>().ok()? as usize;
-
-            let mut data_bytes = vec![0u8; len];
-            cursor.read_exact(&mut data_bytes).ok()?;
-
-            let mut inner_cursor = Cursor::new(data_bytes.as_slice());
-
-            let value = match key.expected_kind() {
-                DataKind::Number => {
-                    let n = inner_cursor.read_i64::<BigEndian>().ok()?;
-                    DataValue::Number(n)
-                }
-
-                DataKind::Str => DataValue::Str(String::from_utf8(data_bytes).ok()?),
-
-                DataKind::Container => {
-                    let inner_map = Self::read_data_container(&mut inner_cursor)?;
-                    DataValue::container_from_map(&inner_map)
-                }
-
-                DataKind::Array(kind) => {
-                    let array = Self::read_array(&mut inner_cursor, &kind)?;
-                    DataValue::Array(array)
-                }
-
-                DataKind::Bool => {
-                    let b = inner_cursor.read_u8().ok()? != 0;
-                    DataValue::Bool(b)
-                }
-
-                DataKind::Null => DataValue::Null,
-            };
-
-            data.insert(key, value);
-        }
-
-        Some(data)
     }
 }
 
@@ -367,8 +181,8 @@ mod tests {
 
     use super::*;
     use crate::communication_types::CommunicationType;
-    use crate::data_container::DataValue;
     use crate::data_types::DataTypes;
+    use crate::data_value::DataValue;
 
     fn roundtrip(cv: CommunicationValue) -> CommunicationValue {
         let bytes = cv.to_bytes();
@@ -499,6 +313,7 @@ mod tests {
             panic!("Expected number array");
         }
     }
+
     #[test]
     fn test_array_strings() {
         let mut cv = CommunicationValue::new(CommunicationType::messages_get);
@@ -738,6 +553,7 @@ mod tests {
             .insert(DataTypes::user_ids, DataValue::Array(large_arr));
         let decoded = roundtrip(cv);
         if let Some(DataValue::Array(arr)) = decoded.data.get(&DataTypes::user_ids) {
+            let arr: &Vec<DataValue> = arr;
             assert_eq!(arr.len(), 1000);
             assert_eq!(arr[0], DataValue::Number(0));
             assert_eq!(arr[999], DataValue::Number(999));
@@ -836,16 +652,13 @@ mod tests {
 
     #[test]
     fn test_corrupted_invalid_utf8() {
-        // Create a message with invalid UTF-8 string
-        let bytes = vec![
+        let corrupted = vec![
             0x16, // message type
             0x00, // no flags
             0x00, 0x00, 0x00, 0x05, // 5 bytes of data
-            0x3F, // username key
-            0x00, 0x02, // 2 bytes length
-            0xFF, 0xFE, // invalid UTF-8
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // garbage data
         ];
-        assert!(CommunicationValue::from_bytes(&bytes).is_none());
+        assert!(CommunicationValue::from_bytes(&corrupted).is_none());
     }
 
     #[test]

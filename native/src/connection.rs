@@ -32,7 +32,6 @@ impl Sender {
                                 }
 
                                 if let Err(e) = Self::send_internal(&connection, &msg).await {
-                                    eprintln!("Send error: {:?}", e);
                                     conn_handle.close(Some(e));
                                     break;
                                 }
@@ -144,7 +143,6 @@ impl Receiver {
                                 }
                             }
                             Err(e) => {
-                                eprintln!("Receive error: {:?}", e);
                                 conn_handle.close(Some(e));
                                 break;
                             }

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+base64 = "0.22.1"
 byteorder = "1.5.0"
 rand = "0.8.0"
 strum = "0.28.0"

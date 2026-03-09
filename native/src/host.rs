@@ -33,24 +33,17 @@ pub async fn host(
 
             let request = match incoming_session.await {
                 Ok(req) => req,
-                Err(e) => {
-                    eprintln!("Session accept error: {:?}", e);
+                Err(_) => {
                     continue;
                 }
             };
-
-            println!("New WebTransport request from: {:?}", request.authority());
-            println!("Path: {:?}", request.path());
 
             let connection = match request.accept().await {
                 Ok(conn) => conn,
-                Err(e) => {
-                    eprintln!("WebTransport accept error: {:?}", e);
+                Err(_) => {
                     continue;
                 }
             };
-
-            println!("WebTransport connection established!");
 
             let incoming_tx = incoming_tx.clone();
             tokio::spawn(handle_connection(connection, incoming_tx));
