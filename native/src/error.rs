@@ -2,6 +2,18 @@ use thiserror::Error;
 
 #[derive(Debug, Error, Clone)]
 pub enum CommunicationError {
+    #[error("Use after Closed")]
+    UseAfterClosed,
+
+    #[error("Connection closed by local shutdown")]
+    ClosedLocally,
+
+    #[error("Connection closed by peer")]
+    ClosedByPeer,
+
+    #[error("Connection terminated unexpectedly")]
+    ConnectionLost,
+
     #[error("QUIC error: {0}")]
     Quinn(#[from] quinn::ConnectionError),
 

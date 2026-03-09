@@ -22,6 +22,10 @@ impl ConnectionHandle {
         }
     }
 
+    pub fn is_open(&self) -> bool {
+        !self.closed.load(Ordering::SeqCst)
+    }
+
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::SeqCst)
     }

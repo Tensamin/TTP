@@ -6,17 +6,27 @@ use wtransport::Connection;
 
 pub const MAX_MESSAGE_SIZE: u64 = 1_000_000_000;
 const CHANNEL_SIZE: usize = 100;
+const CLOSE_FRAME_LEN: u32 = u32::MAX;
+const APPLICATION_CLOSE_CODE: u32 = 0;
+const APPLICATION_CLOSE_REASON: &str = "epsilon-close";
+
+enum ReceivedFrame {
+    Message(CommunicationValue),
+    ClosedByPeer,
+}
 
 pub struct Sender {
     tx: mpsc::Sender<CommunicationValue>,
     _task: tokio::task::JoinHandle<()>,
     handle: Arc<ConnectionHandle>,
+    connection: Connection,
 }
 
 impl Sender {
     pub fn new(connection: Connection, handle: Arc<ConnectionHandle>) -> Self {
         let (tx, mut rx) = mpsc::channel::<CommunicationValue>(CHANNEL_SIZE);
         let conn_handle = handle.clone();
+        let task_connection = connection.clone();
 
         let task = tokio::spawn(async move {
             let mut close_rx = conn_handle.subscribe_close();
@@ -26,12 +36,12 @@ impl Sender {
                     msg = rx.recv() => {
                         match msg {
                             Some(msg) => {
-                                if connection.quic_connection().close_reason().is_some() {
+                                if task_connection.quic_connection().close_reason().is_some() {
                                     conn_handle.close(Some(CommunicationError::StreamClosed));
                                     break;
                                 }
 
-                                if let Err(e) = Self::send_internal(&connection, &msg).await {
+                                if let Err(e) = Self::send_internal(&task_connection, &msg).await {
                                     conn_handle.close(Some(e));
                                     break;
                                 }
@@ -55,6 +65,7 @@ impl Sender {
             tx,
             _task: task,
             handle,
+            connection,
         }
     }
 
@@ -69,7 +80,7 @@ impl Sender {
         let mut stream = opening.await.map_err(|_| CommunicationError::StreamError)?;
 
         let bytes = data.to_bytes();
-        if bytes.len() as u64 > MAX_MESSAGE_SIZE {
+        if bytes.len() as u64 > MAX_MESSAGE_SIZE || bytes.len() as u64 >= CLOSE_FRAME_LEN as u64 {
             return Err(CommunicationError::MessageTooLarge);
         }
 
@@ -86,12 +97,31 @@ impl Sender {
         Ok(())
     }
 
+    async fn send_close_frame(conn: &Connection) -> Result<(), CommunicationError> {
+        let opening = conn
+            .open_uni()
+            .await
+            .map_err(|e| CommunicationError::ConnectionError(e))?;
+        let mut stream = opening.await.map_err(|_| CommunicationError::StreamError)?;
+
+        use tokio::io::AsyncWriteExt;
+        stream
+            .write_u32(CLOSE_FRAME_LEN)
+            .await
+            .map_err(|_| CommunicationError::StreamError)?;
+
+        tokio::spawn(async move {
+            let _ = stream.finish().await;
+        });
+        Ok(())
+    }
+
     pub async fn send(&self, data: &CommunicationValue) -> Result<(), CommunicationError> {
         if self.handle.is_closed() {
             return Err(self
                 .handle
                 .close_reason()
-                .unwrap_or(CommunicationError::StreamClosed));
+                .unwrap_or(CommunicationError::UseAfterClosed));
         }
 
         self.tx.send(data.clone()).await.map_err(|_| {
@@ -106,9 +136,21 @@ impl Sender {
     }
 
     pub fn close(&self) {
-        self.handle.close(None);
-    }
+        let connection = self.connection.clone();
+        let handle = self.handle.clone();
 
+        tokio::spawn(async move {
+            let _ = Self::send_close_frame(&connection).await;
+            connection.quic_connection().close(
+                APPLICATION_CLOSE_CODE.into(),
+                APPLICATION_CLOSE_REASON.as_bytes(),
+            );
+            handle.close(Some(CommunicationError::StreamClosed));
+        });
+    }
+    pub fn is_open(&self) -> bool {
+        self.handle.is_open()
+    }
     pub fn is_closed(&self) -> bool {
         self.handle.is_closed()
     }
@@ -119,14 +161,15 @@ impl Sender {
 }
 
 pub struct Receiver {
-    rx: Mutex<mpsc::Receiver<CommunicationValue>>,
+    rx: Mutex<mpsc::Receiver<Result<CommunicationValue, CommunicationError>>>,
     _task: tokio::task::JoinHandle<()>,
     handle: Arc<ConnectionHandle>,
 }
 
 impl Receiver {
     pub fn new(connection: Connection, handle: Arc<ConnectionHandle>) -> Self {
-        let (tx, rx) = mpsc::channel::<CommunicationValue>(CHANNEL_SIZE);
+        let (tx, rx) =
+            mpsc::channel::<Result<CommunicationValue, CommunicationError>>(CHANNEL_SIZE);
         let conn_handle = handle.clone();
 
         let task = tokio::spawn(async move {
@@ -136,14 +179,27 @@ impl Receiver {
                 tokio::select! {
                     result = Self::receive_internal(&connection) => {
                         match result {
-                            Ok(msg) => {
-                                if tx.send(msg).await.is_err() {
+                            Ok(ReceivedFrame::Message(msg)) => {
+                                if tx.send(Ok(msg)).await.is_err() {
                                     conn_handle.close(None);
                                     break;
                                 }
                             }
+                            Ok(ReceivedFrame::ClosedByPeer) => {
+                                let close_error = CommunicationError::StreamClosed;
+                                let _ = tx.send(Err(close_error.clone())).await;
+                                conn_handle.close(Some(close_error));
+                                break;
+                            }
                             Err(e) => {
-                                conn_handle.close(Some(e));
+                                let close_error = match e {
+                                    CommunicationError::ConnectionError(_) => CommunicationError::StreamClosed,
+                                    CommunicationError::ReadExactError(_) => CommunicationError::StreamClosed,
+                                    CommunicationError::ClosedError(_) => CommunicationError::StreamClosed,
+                                    other => other,
+                                };
+                                let _ = tx.send(Err(close_error.clone())).await;
+                                conn_handle.close(Some(close_error));
                                 break;
                             }
                         }
@@ -164,7 +220,7 @@ impl Receiver {
         }
     }
 
-    async fn receive_internal(conn: &Connection) -> Result<CommunicationValue, CommunicationError> {
+    async fn receive_internal(conn: &Connection) -> Result<ReceivedFrame, CommunicationError> {
         let mut stream = conn
             .accept_uni()
             .await
@@ -174,7 +230,13 @@ impl Receiver {
         let len = stream
             .read_u32()
             .await
-            .map_err(|_| CommunicationError::StreamError)? as usize;
+            .map_err(|_| CommunicationError::StreamError)?;
+
+        if len == CLOSE_FRAME_LEN {
+            return Ok(ReceivedFrame::ClosedByPeer);
+        }
+
+        let len = len as usize;
 
         if len as u64 > MAX_MESSAGE_SIZE {
             return Err(CommunicationError::MessageTooLarge);
@@ -183,7 +245,10 @@ impl Receiver {
         let mut buf = vec![0u8; len];
         stream.read_exact(&mut buf).await?;
 
-        CommunicationValue::from_bytes(&buf).ok_or(CommunicationError::ParseCommunicationValue)
+        let message = CommunicationValue::from_bytes(&buf)
+            .ok_or(CommunicationError::ParseCommunicationValue)?;
+
+        Ok(ReceivedFrame::Message(message))
     }
 
     pub async fn receive(&self) -> Result<CommunicationValue, CommunicationError> {
@@ -196,32 +261,32 @@ impl Receiver {
 
         let result = self.rx.lock().await.recv().await;
 
-        if self.handle.is_closed() {
-            return Err(self
-                .handle
-                .close_reason()
-                .unwrap_or(CommunicationError::StreamClosed));
+        if let Some(result) = result {
+            return result;
         }
 
-        result.ok_or(CommunicationError::StreamClosed)
+        Err(self
+            .handle
+            .close_reason()
+            .unwrap_or(CommunicationError::StreamClosed))
     }
 
-    /// Get the connection handle
     pub fn handle(&self) -> &Arc<ConnectionHandle> {
         &self.handle
     }
 
-    /// Close this connection (also signals Sender to stop)
     pub fn close(&self) {
         self.handle.close(None);
     }
 
-    /// Check if closed
+    pub fn is_open(&self) -> bool {
+        self.handle.is_open()
+    }
+
     pub fn is_closed(&self) -> bool {
         self.handle.is_closed()
     }
 
-    /// Get close reason
     pub fn close_reason(&self) -> Option<CommunicationError> {
         self.handle.close_reason()
     }
