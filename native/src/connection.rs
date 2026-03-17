@@ -2,6 +2,7 @@ use crate::{CommunicationError, ConnectionHandle};
 use epsilon_core::CommunicationValue;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
+use tokio::time::{Duration, sleep};
 use wtransport::Connection;
 
 pub const MAX_MESSAGE_SIZE: u64 = 1_000_000_000;
@@ -9,6 +10,8 @@ const CHANNEL_SIZE: usize = 100;
 const CLOSE_FRAME_LEN: u32 = u32::MAX;
 const APPLICATION_CLOSE_CODE: u32 = 0;
 const APPLICATION_CLOSE_REASON: &str = "epsilon-close";
+const MAX_SEND_RETRIES: usize = 3;
+const SEND_RETRY_BASE_DELAY_MS: u64 = 20;
 
 enum ReceivedFrame {
     Message(CommunicationValue),
@@ -37,11 +40,13 @@ impl Sender {
                         match msg {
                             Some(msg) => {
                                 if task_connection.quic_connection().close_reason().is_some() {
+                                    println!("[connection::Sender] connection already closed before send");
                                     conn_handle.close(Some(CommunicationError::StreamClosed));
                                     break;
                                 }
 
                                 if let Err(e) = Self::send_internal(&task_connection, &msg).await {
+                                    println!("[connection::Sender] send failed permanently: {:?}", e);
                                     conn_handle.close(Some(e));
                                     break;
                                 }
@@ -73,28 +78,73 @@ impl Sender {
         conn: &Connection,
         data: &CommunicationValue,
     ) -> Result<(), CommunicationError> {
-        let opening = conn
-            .open_uni()
-            .await
-            .map_err(|e| CommunicationError::ConnectionError(e))?;
-        let mut stream = opening.await.map_err(|_| CommunicationError::StreamError)?;
-
         let bytes = data.to_bytes();
         if bytes.len() as u64 > MAX_MESSAGE_SIZE || bytes.len() as u64 >= CLOSE_FRAME_LEN as u64 {
             return Err(CommunicationError::MessageTooLarge);
         }
 
-        use tokio::io::AsyncWriteExt;
-        stream
-            .write_u32(bytes.len() as u32)
-            .await
-            .map_err(|_| CommunicationError::StreamError)?;
-        stream.write_all(&bytes).await?;
+        let mut attempt: usize = 0;
+        loop {
+            attempt += 1;
+            println!(
+                "[Sender] send attempt {attempt}/{MAX_SEND_RETRIES}, payload_bytes={}",
+                bytes.len()
+            );
 
-        tokio::spawn(async move {
-            let _ = stream.finish().await;
-        });
-        Ok(())
+            let opening = match conn.open_uni().await {
+                Ok(opening) => opening,
+                Err(e) => {
+                    println!("[Sender] open_uni failed on attempt {attempt}: {e}");
+                    if attempt >= MAX_SEND_RETRIES {
+                        return Err(CommunicationError::ConnectionError(e));
+                    }
+                    let delay_ms = SEND_RETRY_BASE_DELAY_MS * (1u64 << (attempt - 1));
+                    sleep(Duration::from_millis(delay_ms)).await;
+                    continue;
+                }
+            };
+
+            let mut stream = match opening.await {
+                Ok(stream) => stream,
+                Err(_) => {
+                    println!("[Sender] stream open failed on attempt {attempt}");
+                    if attempt >= MAX_SEND_RETRIES {
+                        return Err(CommunicationError::StreamError);
+                    }
+                    let delay_ms = SEND_RETRY_BASE_DELAY_MS * (1u64 << (attempt - 1));
+                    sleep(Duration::from_millis(delay_ms)).await;
+                    continue;
+                }
+            };
+
+            use tokio::io::AsyncWriteExt;
+            if let Err(_) = stream.write_u32(bytes.len() as u32).await {
+                println!("[Sender] write length failed on attempt {attempt}");
+                if attempt >= MAX_SEND_RETRIES {
+                    return Err(CommunicationError::StreamError);
+                }
+                let delay_ms = SEND_RETRY_BASE_DELAY_MS * (1u64 << (attempt - 1));
+                sleep(Duration::from_millis(delay_ms)).await;
+                continue;
+            }
+
+            if let Err(e) = stream.write_all(&bytes).await {
+                println!("[Sender] write payload failed on attempt {attempt}: {e}");
+                if attempt >= MAX_SEND_RETRIES {
+                    return Err(e.into());
+                }
+                let delay_ms = SEND_RETRY_BASE_DELAY_MS * (1u64 << (attempt - 1));
+                sleep(Duration::from_millis(delay_ms)).await;
+                continue;
+            }
+
+            tokio::spawn(async move {
+                if let Err(e) = stream.finish().await {
+                    println!("[Sender] stream finish failed: {e}");
+                }
+            });
+            return Ok(());
+        }
     }
 
     async fn send_close_frame(conn: &Connection) -> Result<(), CommunicationError> {
