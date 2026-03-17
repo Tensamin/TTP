@@ -2,7 +2,7 @@ use crate::{CommunicationError, ConnectionHandle};
 use epsilon_core::CommunicationValue;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
-use tokio::time::{Duration, sleep, timeout};
+use tokio::time::{Duration, sleep};
 use wtransport::Connection;
 
 pub const MAX_MESSAGE_SIZE: u64 = 1_000_000_000;
@@ -12,12 +12,6 @@ const APPLICATION_CLOSE_CODE: u32 = 0;
 const APPLICATION_CLOSE_REASON: &str = "epsilon-close";
 const MAX_SEND_RETRIES: usize = 3;
 const SEND_RETRY_BASE_DELAY_MS: u64 = 20;
-const FORCE_CLOSE_DELAY_MS: u64 = 300;
-const OPEN_STREAM_TIMEOUT_MS: u64 = 2_000;
-const WRITE_TIMEOUT_MS: u64 = 2_000;
-const ACCEPT_STREAM_TIMEOUT_MS: u64 = 10_000;
-const READ_TIMEOUT_MS: u64 = 5_000;
-const MAX_TRANSIENT_RECV_ERRORS: usize = 5;
 
 enum ReceivedFrame {
     Message(CommunicationValue),
@@ -53,7 +47,7 @@ impl Sender {
 
                                 if let Err(e) = Self::send_internal(&task_connection, &msg).await {
                                     println!("[connection::Sender] send failed permanently: {:?}", e);
-                                    conn_handle.close(Some(CommunicationError::StreamClosed));
+                                    conn_handle.close(Some(e));
                                     break;
                                 }
                             }
@@ -97,14 +91,9 @@ impl Sender {
                 bytes.len()
             );
 
-            let opening = match timeout(
-                Duration::from_millis(OPEN_STREAM_TIMEOUT_MS),
-                conn.open_uni(),
-            )
-            .await
-            {
-                Ok(Ok(opening)) => opening,
-                Ok(Err(e)) => {
+            let opening = match conn.open_uni().await {
+                Ok(opening) => opening,
+                Err(e) => {
                     println!("[Sender] open_uni failed on attempt {attempt}: {e}");
                     if attempt >= MAX_SEND_RETRIES {
                         return Err(CommunicationError::ConnectionError(e));
@@ -113,8 +102,12 @@ impl Sender {
                     sleep(Duration::from_millis(delay_ms)).await;
                     continue;
                 }
+            };
+
+            let mut stream = match opening.await {
+                Ok(stream) => stream,
                 Err(_) => {
-                    println!("[Sender] open_uni timed out on attempt {attempt}");
+                    println!("[Sender] stream open failed on attempt {attempt}");
                     if attempt >= MAX_SEND_RETRIES {
                         return Err(CommunicationError::StreamError);
                     }
@@ -124,51 +117,8 @@ impl Sender {
                 }
             };
 
-            let mut stream =
-                match timeout(Duration::from_millis(OPEN_STREAM_TIMEOUT_MS), opening).await {
-                    Ok(Ok(stream)) => stream,
-                    Ok(Err(_)) => {
-                        println!("[Sender] stream open failed on attempt {attempt}");
-                        if attempt >= MAX_SEND_RETRIES {
-                            return Err(CommunicationError::StreamError);
-                        }
-                        let delay_ms = SEND_RETRY_BASE_DELAY_MS * (1u64 << (attempt - 1));
-                        sleep(Duration::from_millis(delay_ms)).await;
-                        continue;
-                    }
-                    Err(_) => {
-                        println!("[Sender] stream open timed out on attempt {attempt}");
-                        if attempt >= MAX_SEND_RETRIES {
-                            return Err(CommunicationError::StreamError);
-                        }
-                        let delay_ms = SEND_RETRY_BASE_DELAY_MS * (1u64 << (attempt - 1));
-                        sleep(Duration::from_millis(delay_ms)).await;
-                        continue;
-                    }
-                };
-
             use tokio::io::AsyncWriteExt;
-            if let Err(_) = timeout(
-                Duration::from_millis(WRITE_TIMEOUT_MS),
-                stream.write_u32(bytes.len() as u32),
-            )
-            .await
-            {
-                println!("[Sender] write length timed out on attempt {attempt}");
-                if attempt >= MAX_SEND_RETRIES {
-                    return Err(CommunicationError::StreamError);
-                }
-                let delay_ms = SEND_RETRY_BASE_DELAY_MS * (1u64 << (attempt - 1));
-                sleep(Duration::from_millis(delay_ms)).await;
-                continue;
-            }
-
-            if let Ok(Err(_)) = timeout(
-                Duration::from_millis(WRITE_TIMEOUT_MS),
-                stream.write_u32(bytes.len() as u32),
-            )
-            .await
-            {
+            if let Err(_) = stream.write_u32(bytes.len() as u32).await {
                 println!("[Sender] write length failed on attempt {attempt}");
                 if attempt >= MAX_SEND_RETRIES {
                     return Err(CommunicationError::StreamError);
@@ -178,31 +128,14 @@ impl Sender {
                 continue;
             }
 
-            match timeout(
-                Duration::from_millis(WRITE_TIMEOUT_MS),
-                stream.write_all(&bytes),
-            )
-            .await
-            {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    println!("[Sender] write payload failed on attempt {attempt}: {e}");
-                    if attempt >= MAX_SEND_RETRIES {
-                        return Err(e.into());
-                    }
-                    let delay_ms = SEND_RETRY_BASE_DELAY_MS * (1u64 << (attempt - 1));
-                    sleep(Duration::from_millis(delay_ms)).await;
-                    continue;
+            if let Err(e) = stream.write_all(&bytes).await {
+                println!("[Sender] write payload failed on attempt {attempt}: {e}");
+                if attempt >= MAX_SEND_RETRIES {
+                    return Err(e.into());
                 }
-                Err(_) => {
-                    println!("[Sender] write payload timed out on attempt {attempt}");
-                    if attempt >= MAX_SEND_RETRIES {
-                        return Err(CommunicationError::StreamError);
-                    }
-                    let delay_ms = SEND_RETRY_BASE_DELAY_MS * (1u64 << (attempt - 1));
-                    sleep(Duration::from_millis(delay_ms)).await;
-                    continue;
-                }
+                let delay_ms = SEND_RETRY_BASE_DELAY_MS * (1u64 << (attempt - 1));
+                sleep(Duration::from_millis(delay_ms)).await;
+                continue;
             }
 
             tokio::spawn(async move {
