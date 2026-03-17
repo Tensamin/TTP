@@ -22,6 +22,7 @@ const TRANSIENT_RECV_BACKOFF_MS: u64 = 25;
 enum ReceivedFrame {
     Message(CommunicationValue),
     ClosedByPeer,
+    Idle,
 }
 
 pub struct Sender {
@@ -263,6 +264,10 @@ impl Receiver {
                                 conn_handle.close(Some(close_error));
                                 break;
                             }
+                            Ok(ReceivedFrame::Idle) => {
+                                transient_errors = 0;
+                                continue;
+                            }
                             Err(e) => {
                                 println!("[Receiver] receive_internal failed: {:?}", e);
 
@@ -329,8 +334,7 @@ impl Receiver {
                 return Err(CommunicationError::ConnectionError(e));
             }
             Err(_) => {
-                println!("[Receiver] accept_uni timed out");
-                return Err(CommunicationError::StreamError);
+                return Ok(ReceivedFrame::Idle);
             }
         };
 
