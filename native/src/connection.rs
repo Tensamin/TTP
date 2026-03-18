@@ -18,8 +18,6 @@ const READ_TIMEOUT_MS: u64 = 5_000;
 const FORCE_CLOSE_DELAY_MS: u64 = 300;
 const MAX_TRANSIENT_RECV_ERRORS: usize = 5;
 const TRANSIENT_RECV_BACKOFF_MS: u64 = 25;
-const MAX_TRANSIENT_SEND_ERRORS: usize = 1;
-const TRANSIENT_SEND_BACKOFF_MS: u64 = 15;
 
 enum ReceivedFrame {
     Message(CommunicationValue),
@@ -29,6 +27,7 @@ enum ReceivedFrame {
 
 pub struct Sender {
     send_guard: Mutex<()>,
+    stream_guard: Mutex<Option<wtransport::SendStream>>,
     handle: Arc<ConnectionHandle>,
     connection: Connection,
 }
@@ -37,6 +36,7 @@ impl Sender {
     pub fn new(connection: Connection, handle: Arc<ConnectionHandle>) -> Self {
         Self {
             send_guard: Mutex::new(()),
+            stream_guard: Mutex::new(None),
             handle,
             connection,
         }
@@ -83,21 +83,9 @@ impl Sender {
         }
     }
 
-    fn is_transient_send_error(error: &CommunicationError) -> bool {
-        matches!(
-            error,
-            CommunicationError::ConnectionError(_)
-                | CommunicationError::ReadExactError(_)
-                | CommunicationError::ClosedError(_)
-                | CommunicationError::StreamReadExactError(_)
-                | CommunicationError::StreamError
-        )
-    }
-
-    async fn send_one_frame(
+    async fn open_uni_stream(
         conn: &Connection,
-        data: &CommunicationValue,
-    ) -> Result<(), CommunicationError> {
+    ) -> Result<wtransport::SendStream, CommunicationError> {
         let opening = timeout(
             Duration::from_millis(OPEN_STREAM_TIMEOUT_MS),
             conn.open_uni(),
@@ -106,58 +94,58 @@ impl Sender {
         .map_err(|_| CommunicationError::StreamError)?
         .map_err(CommunicationError::ConnectionError)?;
 
-        let mut stream = timeout(Duration::from_millis(OPEN_STREAM_TIMEOUT_MS), opening)
+        let stream = timeout(Duration::from_millis(OPEN_STREAM_TIMEOUT_MS), opening)
             .await
             .map_err(|_| CommunicationError::StreamError)?
             .map_err(|_| CommunicationError::StreamError)?;
 
-        Self::write_frame(&mut stream, data).await?;
-
-        timeout(Duration::from_millis(WRITE_TIMEOUT_MS), stream.finish())
-            .await
-            .map_err(|_| CommunicationError::StreamError)?
-            .map_err(CommunicationError::from)?;
-
-        Ok(())
+        Ok(stream)
     }
 
-    async fn send_with_retry(
+    async fn ensure_stream<'a>(
         conn: &Connection,
-        data: &CommunicationValue,
-    ) -> Result<(), CommunicationError> {
-        let mut attempts: usize = 0;
-        loop {
-            let result = Self::send_one_frame(conn, data).await;
-            match result {
-                Ok(()) => return Ok(()),
-                Err(e) => {
-                    let transient = Self::is_transient_send_error(&e)
-                        && conn.quic_connection().close_reason().is_none()
-                        && attempts < MAX_TRANSIENT_SEND_ERRORS;
-                    if transient {
-                        attempts += 1;
-                        sleep(Duration::from_millis(TRANSIENT_SEND_BACKOFF_MS)).await;
-                        continue;
-                    }
-                    return Err(e);
-                }
-            }
+        stream_opt: &'a mut Option<wtransport::SendStream>,
+    ) -> Result<&'a mut wtransport::SendStream, CommunicationError> {
+        if stream_opt.is_none() {
+            *stream_opt = Some(Self::open_uni_stream(conn).await?);
+        }
+
+        match stream_opt.as_mut() {
+            Some(stream) => Ok(stream),
+            None => Err(CommunicationError::StreamError),
         }
     }
 
-    async fn send_close_frame(conn: &Connection) -> Result<(), CommunicationError> {
-        let opening = timeout(
-            Duration::from_millis(OPEN_STREAM_TIMEOUT_MS),
-            conn.open_uni(),
-        )
-        .await
-        .map_err(|_| CommunicationError::StreamError)?
-        .map_err(CommunicationError::ConnectionError)?;
+    async fn send_on_persistent_stream(
+        conn: &Connection,
+        stream_opt: &mut Option<wtransport::SendStream>,
+        data: &CommunicationValue,
+    ) -> Result<(), CommunicationError> {
+        let first_result = {
+            let stream = Self::ensure_stream(conn, stream_opt).await?;
+            Self::write_frame(stream, data).await
+        };
 
-        let mut stream = timeout(Duration::from_millis(OPEN_STREAM_TIMEOUT_MS), opening)
-            .await
-            .map_err(|_| CommunicationError::StreamError)?
-            .map_err(|_| CommunicationError::StreamError)?;
+        if first_result.is_ok() {
+            return Ok(());
+        }
+
+        *stream_opt = None;
+        let second_result = {
+            let stream = Self::ensure_stream(conn, stream_opt).await?;
+            Self::write_frame(stream, data).await
+        };
+
+        if second_result.is_ok() {
+            return Ok(());
+        }
+
+        *stream_opt = None;
+        second_result
+    }
+
+    async fn send_close_frame(conn: &Connection) -> Result<(), CommunicationError> {
+        let mut stream = Self::open_uni_stream(conn).await?;
 
         use tokio::io::AsyncWriteExt;
         timeout(
@@ -186,7 +174,7 @@ impl Sender {
                 .unwrap_or(CommunicationError::UseAfterClosed));
         }
 
-        let _guard = self.send_guard.lock().await;
+        let _send_lock = self.send_guard.lock().await;
 
         if self.connection.quic_connection().close_reason().is_some() {
             let reason = self
@@ -197,15 +185,20 @@ impl Sender {
             return Err(reason);
         }
 
-        match Self::send_with_retry(&self.connection, data).await {
+        let mut stream_opt = self.stream_guard.lock().await;
+
+        match Self::send_on_persistent_stream(&self.connection, &mut stream_opt, data).await {
             Ok(()) => Ok(()),
             Err(e) => {
                 let normalized = Self::normalize_send_error(e);
+                *stream_opt = None;
+
                 if self.connection.quic_connection().close_reason().is_some()
                     || matches!(normalized, CommunicationError::StreamClosed)
                 {
                     self.handle.close(Some(normalized.clone()));
                 }
+
                 Err(normalized)
             }
         }
