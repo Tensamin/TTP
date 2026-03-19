@@ -1,4 +1,3 @@
-use epsilon_core::{CommunicationType, CommunicationValue, DataKind, DataTypes, DataValue};
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
@@ -8,6 +7,7 @@ use ratatui::{
         terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
     },
     layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
+    prelude::Backend,
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{
@@ -15,9 +15,10 @@ use ratatui::{
         ScrollbarOrientation, Wrap,
     },
 };
-use std::io;
+use std::io::{self, Error};
 use std::time::Duration;
 use strum::IntoEnumIterator;
+use ttp_core::{CommunicationType, CommunicationValue, DataKind, DataTypes, DataValue};
 
 pub struct CommToBinaryApp {
     comm_type: CommunicationType,
@@ -91,12 +92,15 @@ impl CommToBinaryApp {
     fn run_app<B: ratatui::backend::Backend>(
         &mut self,
         terminal: &mut Terminal<B>,
-    ) -> io::Result<()> {
+    ) -> Result<(), Error>
+    where
+        std::io::Error: From<<B as Backend>::Error>,
+    {
         let tick_rate = Duration::from_millis(250);
         let mut last_tick = std::time::Instant::now();
 
         loop {
-            terminal.draw(|f| self.draw(f));
+            terminal.draw(|f| self.draw(f))?;
 
             let timeout = tick_rate
                 .checked_sub(last_tick.elapsed())
@@ -248,6 +252,7 @@ impl CommToBinaryApp {
         }
     }
 
+    #[allow(unused_variables)]
     fn handle_edit_input(&mut self, key: KeyCode, modifiers: KeyModifiers) {
         match key {
             KeyCode::Esc => self.edit_mode = false,

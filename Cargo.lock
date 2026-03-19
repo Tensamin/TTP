@@ -448,52 +448,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 
 [[package]]
-name = "epsilon-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "aws-lc-rs",
- "bytes",
- "crossterm",
- "epsilon-core",
- "quinn",
- "ratatui",
- "rcgen",
- "rustls",
- "rustls-native-certs",
- "strum 0.28.0",
- "thiserror 2.0.18",
- "tokio",
- "wtransport",
- "wtransport-proto",
-]
-
-[[package]]
-name = "epsilon-core"
-version = "0.1.0"
-dependencies = [
- "base64",
- "byteorder",
- "rand 0.8.5",
- "strum 0.28.0",
- "strum_macros 0.28.0",
-]
-
-[[package]]
-name = "epsilon-native"
-version = "0.1.0"
-dependencies = [
- "epsilon-core",
- "quinn",
- "rustls",
- "rustls-native-certs",
- "thiserror 2.0.18",
- "tokio",
- "wtransport",
-]
-
-[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2178,6 +2132,52 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
+]
+
+[[package]]
+name = "ttp-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "aws-lc-rs",
+ "bytes",
+ "crossterm",
+ "quinn",
+ "ratatui",
+ "rcgen",
+ "rustls",
+ "rustls-native-certs",
+ "strum 0.28.0",
+ "thiserror 2.0.18",
+ "tokio",
+ "ttp-core",
+ "wtransport",
+ "wtransport-proto",
+]
+
+[[package]]
+name = "ttp-core"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "byteorder",
+ "rand 0.8.5",
+ "strum 0.28.0",
+ "strum_macros 0.28.0",
+]
+
+[[package]]
+name = "ttp-native"
+version = "0.1.0"
+dependencies = [
+ "quinn",
+ "rustls",
+ "rustls-native-certs",
+ "thiserror 2.0.18",
+ "tokio",
+ "ttp-core",
+ "wtransport",
 ]
 
 [[package]]

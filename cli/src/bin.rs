@@ -1,4 +1,3 @@
-use epsilon_core::{CommunicationType, CommunicationValue, DataTypes, DataValue};
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
@@ -10,14 +9,11 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{
-        Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar,
-        ScrollbarOrientation, Wrap,
-    },
+    widgets::{Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, Wrap},
 };
 use std::io;
 use std::time::Duration;
-use strum::IntoEnumIterator;
+use ttp_core::{CommunicationValue, DataTypes, DataValue};
 
 pub struct BinaryToCommApp {
     binary_input: String,
