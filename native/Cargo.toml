@@ -1,10 +1,10 @@
 [package]
-name = "epsilon-native"
+name = "ttp-native"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-epsilon-core = { path = "../core" }
+ttp-core = { path = "../core" }
 wtransport = { version = "0.7.0", default-features = false, features = [
     "aws-lc-rs",
     "quinn",

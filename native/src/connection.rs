@@ -1,15 +1,15 @@
 use crate::{CommunicationError, ConnectionHandle};
-use epsilon_core::CommunicationValue;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use tokio::time::{Duration, sleep, timeout};
+use ttp_core::CommunicationValue;
 use wtransport::Connection;
 
 pub const MAX_MESSAGE_SIZE: u64 = 1_000_000_000;
 const CHANNEL_SIZE: usize = 100;
 const CLOSE_FRAME_LEN: u32 = u32::MAX;
 const APPLICATION_CLOSE_CODE: u32 = 0;
-const APPLICATION_CLOSE_REASON: &str = "epsilon-close";
+const APPLICATION_CLOSE_REASON: &str = "ttp-close";
 
 const OPEN_STREAM_TIMEOUT_MS: u64 = 2_000;
 const WRITE_TIMEOUT_MS: u64 = 2_000;

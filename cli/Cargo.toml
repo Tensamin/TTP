@@ -1,11 +1,11 @@
 [package]
-name = "epsilon-cli"
+name = "ttp-cli"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 rcgen = "0.14.7"
-epsilon-core = { path = "../core" }
+ttp-core = { path = "../core" }
 wtransport = { version = "0.7.0", default-features = false, features = [
     "aws-lc-rs",
     "quinn",
