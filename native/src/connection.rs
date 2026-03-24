@@ -1,12 +1,11 @@
 use crate::{CommunicationError, ConnectionHandle};
 use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, watch};
 use tokio::time::{Duration, sleep, timeout};
 use ttp_core::CommunicationValue;
 use wtransport::Connection;
 
 pub const MAX_MESSAGE_SIZE: u64 = 1_000_000_000;
-const CHANNEL_SIZE: usize = 100;
 const CLOSE_FRAME_LEN: u32 = u32::MAX;
 const APPLICATION_CLOSE_CODE: u32 = 0;
 const APPLICATION_CLOSE_REASON: &str = "ttp-close";
@@ -112,7 +111,7 @@ impl Sender {
 
         match stream_opt.as_mut() {
             Some(stream) => Ok(stream),
-            None => Err(CommunicationError::StreamError),
+            _ => Err(CommunicationError::StreamError),
         }
     }
 
@@ -242,16 +241,21 @@ impl Sender {
     }
 }
 
+#[derive(Clone, Debug)]
+enum ReceiverState {
+    Pending,
+    Data(Result<CommunicationValue, CommunicationError>),
+}
+
 pub struct Receiver {
-    rx: Mutex<mpsc::Receiver<Result<CommunicationValue, CommunicationError>>>,
+    rx: Mutex<watch::Receiver<ReceiverState>>,
     _task: tokio::task::JoinHandle<()>,
     handle: Arc<ConnectionHandle>,
 }
 
 impl Receiver {
     pub fn new(connection: Connection, handle: Arc<ConnectionHandle>) -> Self {
-        let (tx, rx) =
-            mpsc::channel::<Result<CommunicationValue, CommunicationError>>(CHANNEL_SIZE);
+        let (tx, rx) = watch::channel(ReceiverState::Pending);
         let conn_handle = handle.clone();
 
         let task = tokio::spawn(async move {
@@ -264,14 +268,11 @@ impl Receiver {
                         match result {
                             Ok(ReceivedFrame::Message(msg)) => {
                                 transient_errors = 0;
-                                if tx.send(Ok(msg)).await.is_err() {
-                                    conn_handle.close(None);
-                                    break;
-                                }
+                                let _ = tx.send(ReceiverState::Data(Ok(msg)));
                             }
                             Ok(ReceivedFrame::ClosedByPeer) => {
                                 let close_error = CommunicationError::StreamClosed;
-                                let _ = tx.send(Err(close_error.clone())).await;
+                                let _ = tx.send(ReceiverState::Data(Err(close_error.clone())));
                                 conn_handle.close(Some(close_error));
                                 break;
                             }
@@ -279,7 +280,7 @@ impl Receiver {
                                 transient_errors = 0;
                                 if connection.quic_connection().close_reason().is_some() {
                                     let close_error = CommunicationError::StreamClosed;
-                                    let _ = tx.send(Err(close_error.clone())).await;
+                                    let _ = tx.send(ReceiverState::Data(Err(close_error.clone())));
                                     conn_handle.close(Some(close_error));
                                     break;
                                 }
@@ -309,14 +310,15 @@ impl Receiver {
                                 }
 
                                 let close_error = match e {
-                                    CommunicationError::ConnectionError(_) => CommunicationError::StreamClosed,
-                                    CommunicationError::ReadExactError(_) => CommunicationError::StreamClosed,
-                                    CommunicationError::ClosedError(_) => CommunicationError::StreamClosed,
-                                    CommunicationError::StreamReadExactError(_) => CommunicationError::StreamClosed,
-                                    CommunicationError::StreamError => CommunicationError::StreamClosed,
+                                    CommunicationError::ConnectionError(_)
+                                    | CommunicationError::ReadExactError(_)
+                                    | CommunicationError::ClosedError(_)
+                                    | CommunicationError::StreamReadExactError(_)
+                                    | CommunicationError::StreamError => CommunicationError::StreamClosed,
                                     other => other,
                                 };
-                                let _ = tx.send(Err(close_error.clone())).await;
+
+                                let _ = tx.send(ReceiverState::Data(Err(close_error.clone())));
                                 conn_handle.close(Some(close_error));
                                 break;
                             }
@@ -410,16 +412,21 @@ impl Receiver {
                 .unwrap_or(CommunicationError::StreamClosed));
         }
 
-        let result = self.rx.lock().await.recv().await;
+        let mut rx = self.rx.lock().await;
 
-        if let Some(result) = result {
-            return result;
+        loop {
+            match rx.borrow_and_update().clone() {
+                ReceiverState::Data(result) => return result,
+                ReceiverState::Pending => {}
+            }
+
+            if rx.changed().await.is_err() {
+                return Err(self
+                    .handle
+                    .close_reason()
+                    .unwrap_or(CommunicationError::StreamClosed));
+            }
         }
-
-        Err(self
-            .handle
-            .close_reason()
-            .unwrap_or(CommunicationError::StreamClosed))
     }
 
     pub fn handle(&self) -> &Arc<ConnectionHandle> {
