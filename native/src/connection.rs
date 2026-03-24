@@ -1,6 +1,6 @@
 use crate::{CommunicationError, ConnectionHandle};
 use std::sync::Arc;
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{Mutex, mpsc};
 use tokio::time::{Duration, sleep, timeout};
 use ttp_core::CommunicationValue;
 use wtransport::Connection;
@@ -18,6 +18,9 @@ const FORCE_CLOSE_DELAY_MS: u64 = 300;
 const MAX_TRANSIENT_RECV_ERRORS: usize = 5;
 const TRANSIENT_RECV_BACKOFF_MS: u64 = 25;
 
+const RECEIVER_QUEUE_CAPACITY: usize = 1000;
+
+#[allow(unused)]
 enum ReceivedFrame {
     Message(CommunicationValue),
     ClosedByPeer,
@@ -241,123 +244,128 @@ impl Sender {
     }
 }
 
-#[derive(Clone, Debug)]
-enum ReceiverState {
-    Pending,
-    Data(Result<CommunicationValue, CommunicationError>),
-}
-
 pub struct Receiver {
-    rx: Mutex<watch::Receiver<ReceiverState>>,
-    _task: tokio::task::JoinHandle<()>,
+    rx: Mutex<mpsc::Receiver<Result<CommunicationValue, CommunicationError>>>,
+    _accept_task: tokio::task::JoinHandle<()>,
     handle: Arc<ConnectionHandle>,
 }
 
 impl Receiver {
     pub fn new(connection: Connection, handle: Arc<ConnectionHandle>) -> Self {
-        let (tx, rx) = watch::channel(ReceiverState::Pending);
-        let conn_handle = handle.clone();
+        let (tx, rx) = mpsc::channel::<Result<CommunicationValue, CommunicationError>>(
+            RECEIVER_QUEUE_CAPACITY,
+        );
 
-        let task = tokio::spawn(async move {
+        let conn_handle = handle.clone();
+        let accept_connection = connection.clone();
+
+        let accept_task = tokio::spawn(async move {
             let mut close_rx = conn_handle.subscribe_close();
             let mut transient_errors: usize = 0;
 
             loop {
                 tokio::select! {
-                    result = Self::receive_internal(&connection) => {
-                        match result {
-                            Ok(ReceivedFrame::Message(msg)) => {
-                                transient_errors = 0;
-                                let _ = tx.send(ReceiverState::Data(Ok(msg)));
-                            }
-                            Ok(ReceivedFrame::ClosedByPeer) => {
-                                let close_error = CommunicationError::StreamClosed;
-                                let _ = tx.send(ReceiverState::Data(Err(close_error.clone())));
-                                conn_handle.close(Some(close_error));
-                                break;
-                            }
-                            Ok(ReceivedFrame::Idle) => {
-                                transient_errors = 0;
-                                if connection.quic_connection().close_reason().is_some() {
-                                    let close_error = CommunicationError::StreamClosed;
-                                    let _ = tx.send(ReceiverState::Data(Err(close_error.clone())));
-                                    conn_handle.close(Some(close_error));
-                                    break;
-                                }
-                                continue;
-                            }
-                            Err(e) => {
-                                println!("[Receiver] receive_internal failed: {:?}", e);
-
-                                let is_transient = matches!(
-                                    e,
-                                    CommunicationError::ConnectionError(_)
-                                        | CommunicationError::ReadExactError(_)
-                                        | CommunicationError::ClosedError(_)
-                                        | CommunicationError::StreamReadExactError(_)
-                                        | CommunicationError::StreamError
-                                );
-
-                                if is_transient && transient_errors < MAX_TRANSIENT_RECV_ERRORS {
-                                    transient_errors += 1;
-                                    println!(
-                                        "[Receiver] transient receive error {}/{}; continuing",
-                                        transient_errors,
-                                        MAX_TRANSIENT_RECV_ERRORS
-                                    );
-                                    sleep(Duration::from_millis(TRANSIENT_RECV_BACKOFF_MS)).await;
-                                    continue;
-                                }
-
-                                let close_error = match e {
-                                    CommunicationError::ConnectionError(_)
-                                    | CommunicationError::ReadExactError(_)
-                                    | CommunicationError::ClosedError(_)
-                                    | CommunicationError::StreamReadExactError(_)
-                                    | CommunicationError::StreamError => CommunicationError::StreamClosed,
-                                    other => other,
-                                };
-
-                                let _ = tx.send(ReceiverState::Data(Err(close_error.clone())));
-                                conn_handle.close(Some(close_error));
-                                break;
-                            }
-                        }
-                    }
                     _ = close_rx.changed() => {
                         if close_rx.borrow().is_some() {
                             break;
                         }
                     }
+
+                    accepted = timeout(
+                        Duration::from_millis(ACCEPT_STREAM_TIMEOUT_MS),
+                        accept_connection.accept_uni()
+                    ) => {
+                        match accepted {
+                            Ok(Ok(stream)) => {
+                                transient_errors = 0;
+
+                                let tx_stream = tx.clone();
+                                let stream_handle = conn_handle.clone();
+
+                                tokio::spawn(async move {
+                                    let frame_result = Self::read_one_frame(stream).await;
+
+                                    match frame_result {
+                                        Ok(ReceivedFrame::Message(msg)) => {
+                                            // bounded mpsc: awaits when full (backpressure)
+                                            if tx_stream.send(Ok(msg)).await.is_err() {
+                                                // receiver dropped; nothing left to deliver to
+                                            }
+                                        }
+                                        Ok(ReceivedFrame::ClosedByPeer) => {
+                                            let close_error = CommunicationError::StreamClosed;
+                                            let _ = tx_stream.send(Err(close_error.clone())).await;
+                                            stream_handle.close(Some(close_error));
+                                        }
+                                        Ok(ReceivedFrame::Idle) => {
+                                            // not expected in per-stream read path
+                                        }
+                                        Err(e) => {
+                                            let close_error = match e {
+                                                CommunicationError::ConnectionError(_)
+                                                | CommunicationError::ReadExactError(_)
+                                                | CommunicationError::ClosedError(_)
+                                                | CommunicationError::StreamReadExactError(_)
+                                                | CommunicationError::StreamError => CommunicationError::StreamClosed,
+                                                other => other,
+                                            };
+
+                                            let _ = tx_stream.send(Err(close_error.clone())).await;
+                                            stream_handle.close(Some(close_error));
+                                        }
+                                    }
+                                });
+                            }
+
+                            Ok(Err(e)) => {
+                                println!("[Receiver] accept_uni failed: {e}");
+
+                                let err = CommunicationError::ConnectionError(e);
+                                let is_transient = matches!(err, CommunicationError::ConnectionError(_));
+
+                                if is_transient && transient_errors < MAX_TRANSIENT_RECV_ERRORS {
+                                    transient_errors += 1;
+                                    sleep(Duration::from_millis(TRANSIENT_RECV_BACKOFF_MS)).await;
+                                    continue;
+                                }
+
+                                let close_error = CommunicationError::StreamClosed;
+                                let _ = tx.send(Err(close_error.clone())).await;
+                                conn_handle.close(Some(close_error));
+                                break;
+                            }
+
+                            Err(_) => {
+                                // periodic idle timeout to re-check close state and connection state
+                                if accept_connection.quic_connection().close_reason().is_some() {
+                                    let close_error = CommunicationError::StreamClosed;
+                                    let _ = tx.send(Err(close_error.clone())).await;
+                                    conn_handle.close(Some(close_error));
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if conn_handle.is_closed() {
+                    break;
                 }
             }
         });
 
         Self {
             rx: Mutex::new(rx),
-            _task: task,
+            _accept_task: accept_task,
             handle,
         }
     }
 
-    async fn receive_internal(conn: &Connection) -> Result<ReceivedFrame, CommunicationError> {
-        let mut stream = match timeout(
-            Duration::from_millis(ACCEPT_STREAM_TIMEOUT_MS),
-            conn.accept_uni(),
-        )
-        .await
-        {
-            Ok(Ok(stream)) => stream,
-            Ok(Err(e)) => {
-                println!("[Receiver] accept_uni failed: {e}");
-                return Err(CommunicationError::ConnectionError(e));
-            }
-            Err(_) => {
-                return Ok(ReceivedFrame::Idle);
-            }
-        };
-
+    async fn read_one_frame(
+        mut stream: wtransport::RecvStream,
+    ) -> Result<ReceivedFrame, CommunicationError> {
         use tokio::io::AsyncReadExt;
+
         let len = match timeout(Duration::from_millis(READ_TIMEOUT_MS), stream.read_u32()).await {
             Ok(Ok(len)) => len,
             Ok(Err(e)) => {
@@ -375,7 +383,6 @@ impl Receiver {
         }
 
         let len = len as usize;
-
         if len as u64 > MAX_MESSAGE_SIZE {
             return Err(CommunicationError::MessageTooLarge);
         }
@@ -413,17 +420,9 @@ impl Receiver {
         }
 
         let mut rx = self.rx.lock().await;
-
-        if rx.changed().await.is_err() {
-            return Err(self
-                .handle
-                .close_reason()
-                .unwrap_or(CommunicationError::StreamClosed));
-        }
-
-        match rx.borrow_and_update().clone() {
-            ReceiverState::Data(result) => result,
-            ReceiverState::Pending => Err(self
+        match rx.recv().await {
+            Some(result) => result,
+            _ => Err(self
                 .handle
                 .close_reason()
                 .unwrap_or(CommunicationError::StreamClosed)),
