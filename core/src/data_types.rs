@@ -97,6 +97,8 @@ pub enum DataTypes {
 
     timeout = 85,
     has_admin = 86,
+
+    last_message_at = 87,
 }
 impl DataTypes {
     pub fn expected_kind(&self) -> DataKind {
