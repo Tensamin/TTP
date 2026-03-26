@@ -283,35 +283,37 @@ impl Receiver {
                                 let stream_handle = conn_handle.clone();
 
                                 tokio::spawn(async move {
-                                    let frame_result = Self::read_one_frame(stream).await;
-
-                                    match frame_result {
-                                        Ok(ReceivedFrame::Message(msg)) => {
-                                            // bounded mpsc: awaits when full (backpressure)
-                                            if tx_stream.send(Ok(msg)).await.is_err() {
-                                                // receiver dropped; nothing left to deliver to
+                                    let mut s = stream;
+                                    loop {
+                                        match Self::read_one_frame(&mut s).await {
+                                            Ok(ReceivedFrame::Message(msg)) => {
+                                                if tx_stream.send(Ok(msg)).await.is_err() {
+                                                    break;
+                                                }
                                             }
-                                        }
-                                        Ok(ReceivedFrame::ClosedByPeer) => {
-                                            let close_error = CommunicationError::StreamClosed;
-                                            let _ = tx_stream.send(Err(close_error.clone())).await;
-                                            stream_handle.close(Some(close_error));
-                                        }
-                                        Ok(ReceivedFrame::Idle) => {
-                                            // not expected in per-stream read path
-                                        }
-                                        Err(e) => {
-                                            let close_error = match e {
-                                                CommunicationError::ConnectionError(_)
-                                                | CommunicationError::ReadExactError(_)
-                                                | CommunicationError::ClosedError(_)
-                                                | CommunicationError::StreamReadExactError(_)
-                                                | CommunicationError::StreamError => CommunicationError::StreamClosed,
-                                                other => other,
-                                            };
+                                            Ok(ReceivedFrame::ClosedByPeer) => {
+                                                let close_error = CommunicationError::StreamClosed;
+                                                let _ = tx_stream.send(Err(close_error.clone())).await;
+                                                stream_handle.close(Some(close_error));
+                                                break;
+                                            }
+                                            Ok(ReceivedFrame::Idle) => {
+                                                break;
+                                            }
+                                            Err(e) => {
+                                                let close_error = match e {
+                                                    CommunicationError::ConnectionError(_)
+                                                    | CommunicationError::ReadExactError(_)
+                                                    | CommunicationError::ClosedError(_)
+                                                    | CommunicationError::StreamReadExactError(_)
+                                                    | CommunicationError::StreamError => CommunicationError::StreamClosed,
+                                                    other => other,
+                                                };
 
-                                            let _ = tx_stream.send(Err(close_error.clone())).await;
-                                            stream_handle.close(Some(close_error));
+                                                let _ = tx_stream.send(Err(close_error.clone())).await;
+                                                stream_handle.close(Some(close_error));
+                                                break;
+                                            }
                                         }
                                     }
                                 });
@@ -336,7 +338,6 @@ impl Receiver {
                             }
 
                             Err(_) => {
-                                // periodic idle timeout to re-check close state and connection state
                                 if accept_connection.quic_connection().close_reason().is_some() {
                                     let close_error = CommunicationError::StreamClosed;
                                     let _ = tx.send(Err(close_error.clone())).await;
@@ -362,7 +363,7 @@ impl Receiver {
     }
 
     async fn read_one_frame(
-        mut stream: wtransport::RecvStream,
+        stream: &mut wtransport::RecvStream,
     ) -> Result<ReceivedFrame, CommunicationError> {
         use tokio::io::AsyncReadExt;
 
