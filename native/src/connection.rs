@@ -367,14 +367,10 @@ impl Receiver {
     ) -> Result<ReceivedFrame, CommunicationError> {
         use tokio::io::AsyncReadExt;
 
-        let len = match timeout(Duration::from_millis(READ_TIMEOUT_MS), stream.read_u32()).await {
-            Ok(Ok(len)) => len,
-            Ok(Err(e)) => {
+        let len = match stream.read_u32().await {
+            Ok(len) => len,
+            Err(e) => {
                 println!("[Receiver] read_u32 failed: {e}");
-                return Err(CommunicationError::StreamError);
-            }
-            Err(_) => {
-                println!("[Receiver] read_u32 timed out");
                 return Err(CommunicationError::StreamError);
             }
         };
