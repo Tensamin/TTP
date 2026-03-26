@@ -1,8 +1,6 @@
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 
-use crate::data_value::DataKind;
-
 #[derive(Eq, Hash, PartialEq, EnumIter, Clone, Debug, PartialOrd, Ord)]
 #[allow(non_camel_case_types, dead_code)]
 pub enum DataTypes {
@@ -101,110 +99,6 @@ pub enum DataTypes {
     last_message_at = 87,
 }
 impl DataTypes {
-    pub fn expected_kind(&self) -> DataKind {
-        match self {
-            DataTypes::error_protocol => DataKind::Null,
-
-            DataTypes::user_id
-            | DataTypes::sender_id
-            | DataTypes::register_id
-            | DataTypes::receiver_id
-            | DataTypes::call_id
-            | DataTypes::amount
-            | DataTypes::position
-            | DataTypes::offset
-            | DataTypes::timeout
-            | DataTypes::iota_id
-            | DataTypes::chat_partner_id
-            | DataTypes::untill
-            | DataTypes::start_date
-            | DataTypes::end_date
-            | DataTypes::omikron_id
-            | DataTypes::send_time
-            | DataTypes::sub_level => DataKind::Number,
-
-            DataTypes::error_type
-            | DataTypes::username
-            | DataTypes::display
-            | DataTypes::avatar
-            | DataTypes::about
-            | DataTypes::public_key
-            | DataTypes::message
-            | DataTypes::content
-            | DataTypes::path
-            | DataTypes::codec
-            | DataTypes::function
-            | DataTypes::uuid
-            | DataTypes::link
-            | DataTypes::settings_name
-            | DataTypes::chat_partner_name
-            | DataTypes::user_state
-            | DataTypes::call_state
-            | DataTypes::private_key_hash
-            | DataTypes::name
-            | DataTypes::shared_secret_own
-            | DataTypes::shared_secret_other
-            | DataTypes::shared_secret_sign
-            | DataTypes::shared_secret
-            | DataTypes::message_state
-            | DataTypes::signature
-            | DataTypes::reset_token
-            | DataTypes::new_token
-            | DataTypes::call_token
-            | DataTypes::challenge => DataKind::Str,
-
-            DataTypes::messages
-            | DataTypes::communities
-            | DataTypes::rho_connections
-            | DataTypes::matches => DataKind::Array(Box::new(DataKind::Container)),
-
-            DataTypes::notifications
-            | DataTypes::iota_ids
-            | DataTypes::user_ids
-            | DataTypes::accepted_ids
-            | DataTypes::last_ping
-            | DataTypes::ping_iota
-            | DataTypes::get_time
-            | DataTypes::omikron_connections => DataKind::Array(Box::new(DataKind::Number)),
-
-            DataTypes::settings
-            | DataTypes::user
-            | DataTypes::payload
-            | DataTypes::result
-            | DataTypes::ping_clients
-            | DataTypes::user_pings => DataKind::Container,
-
-            DataTypes::enabled
-            | DataTypes::signed
-            | DataTypes::accepted
-            | DataTypes::has_admin
-            | DataTypes::screen_share => DataKind::Bool,
-
-            DataTypes::user_states => DataKind::Array(Box::new(DataKind::Str)),
-
-            DataTypes::accepted_profiles => DataKind::Null,
-            DataTypes::denied_profiles => DataKind::Null,
-            DataTypes::get_variant => DataKind::Null,
-
-            DataTypes::omikron => DataKind::Null,
-            DataTypes::interactables => DataKind::Null,
-            DataTypes::want_to_watch => DataKind::Null,
-            DataTypes::watcher => DataKind::Null,
-            DataTypes::created_at => DataKind::Null,
-
-            DataTypes::status => DataKind::Null,
-            DataTypes::sub_end => DataKind::Null,
-
-            DataTypes::community_address => DataKind::Null,
-            DataTypes::community_title => DataKind::Null,
-
-            DataTypes::online_status => DataKind::Null,
-            DataTypes::call_invited => DataKind::Null,
-            DataTypes::call_members => DataKind::Null,
-            DataTypes::calls => DataKind::Null,
-        }
-    }
-
     pub fn as_number(&self) -> u8 {
         DataTypes::iter().position(|v| v == *self).unwrap_or(0) as u8
     }
@@ -278,97 +172,6 @@ mod tests {
     fn test_to_string_matches_debug() {
         let datatype = DataTypes::call_id;
         assert_eq!(datatype.to_string(), "call_id");
-    }
-
-    #[test]
-    fn test_all_types_have_expected_kind() {
-        for data_type in DataTypes::iter() {
-            let _kind = data_type.expected_kind();
-        }
-    }
-
-    #[test]
-    fn test_expected_kind_number_types() {
-        let number_types = vec![
-            DataTypes::user_id,
-            DataTypes::sender_id,
-            DataTypes::receiver_id,
-            DataTypes::call_id,
-            DataTypes::amount,
-            DataTypes::offset,
-            DataTypes::iota_id,
-        ];
-
-        for t in number_types {
-            assert_eq!(
-                t.expected_kind(),
-                DataKind::Number,
-                "{:?} should be Number",
-                t
-            );
-        }
-    }
-
-    #[test]
-    fn test_expected_kind_string_types() {
-        let string_types = vec![
-            DataTypes::username,
-            DataTypes::message,
-            DataTypes::content,
-            DataTypes::public_key,
-            DataTypes::uuid,
-        ];
-
-        for t in string_types {
-            assert_eq!(t.expected_kind(), DataKind::Str, "{:?} should be Str", t);
-        }
-    }
-
-    #[test]
-    fn test_expected_kind_bool_types() {
-        let bool_types = vec![
-            DataTypes::enabled,
-            DataTypes::accepted,
-            DataTypes::signed,
-            DataTypes::has_admin,
-            DataTypes::screen_share,
-        ];
-
-        for t in bool_types {
-            assert_eq!(t.expected_kind(), DataKind::Bool, "{:?} should be Bool", t);
-        }
-    }
-
-    #[test]
-    fn test_expected_kind_container_types() {
-        let container_types = vec![
-            DataTypes::settings,
-            DataTypes::user,
-            DataTypes::payload,
-            DataTypes::result,
-        ];
-
-        for t in container_types {
-            assert_eq!(
-                t.expected_kind(),
-                DataKind::Container,
-                "{:?} should be Container",
-                t
-            );
-        }
-    }
-
-    #[test]
-    fn test_expected_kind_array_types() {
-        match DataTypes::user_ids.expected_kind() {
-            DataKind::Array(inner) => assert_eq!(*inner, DataKind::Number),
-            _ => panic!("user_ids should be Array<Number>"),
-        }
-
-        match DataTypes::messages.expected_kind() {
-            DataKind::Array(inner) => assert_eq!(*inner, DataKind::Container),
-            _ => panic!("messages should be Array<Container>"),
-        }
     }
 
     #[test]
@@ -487,21 +290,5 @@ mod tests {
 
         assert_eq!(CommunicationType::error.as_number(), 0);
         assert_eq!(CommunicationType::error_protocol.as_number(), 1);
-    }
-
-    #[test]
-    fn test_null_kinds_are_consistent() {
-        let null_types = vec![
-            DataTypes::error_protocol,
-            DataTypes::accepted_profiles,
-            DataTypes::denied_profiles,
-            DataTypes::get_variant,
-            DataTypes::omikron,
-            DataTypes::interactables,
-        ];
-
-        for t in null_types {
-            assert_eq!(t.expected_kind(), DataKind::Null, "{:?} should be Null", t);
-        }
     }
 }
