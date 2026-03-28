@@ -97,6 +97,7 @@ pub enum DataTypes {
     has_admin = 86,
 
     last_message_at = 87,
+    height = 88,
 }
 impl DataTypes {
     pub fn as_number(&self) -> u8 {
