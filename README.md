@@ -1,2 +1,1 @@
-# TTP
-Tensamin Transport Protocol
+# ⚠️ Moved to [git.methanium.net](https://git.methanium.net/tensamin/ttp) ⚠️
