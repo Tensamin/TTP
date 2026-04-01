@@ -1,9 +1,11 @@
 use crate::{CommunicationError, ConnectionHandle};
+use quinn::ReadExactError;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use tokio::time::{Duration, sleep, timeout};
 use ttp_core::CommunicationValue;
 use wtransport::Connection;
+use wtransport::error::StreamReadExactError;
 
 pub const MAX_MESSAGE_SIZE: u64 = 1_000_000_000;
 const CLOSE_FRAME_LEN: u32 = u32::MAX;
@@ -13,10 +15,10 @@ const APPLICATION_CLOSE_REASON: &str = "ttp-close";
 const OPEN_STREAM_TIMEOUT_MS: u64 = 2_000;
 const WRITE_TIMEOUT_MS: u64 = 2_000;
 const ACCEPT_STREAM_TIMEOUT_MS: u64 = 10_000;
-const READ_TIMEOUT_MS: u64 = 5_000;
+const READ_TIMEOUT_MS: u64 = 30_000;
 const FORCE_CLOSE_DELAY_MS: u64 = 300;
-const MAX_TRANSIENT_RECV_ERRORS: usize = 5;
-const TRANSIENT_RECV_BACKOFF_MS: u64 = 25;
+const MAX_TRANSIENT_RECV_ERRORS: usize = 20;
+const TRANSIENT_RECV_BACKOFF_MS: u64 = 100;
 
 const RECEIVER_QUEUE_CAPACITY: usize = 1000;
 
@@ -123,27 +125,30 @@ impl Sender {
         stream_opt: &mut Option<wtransport::SendStream>,
         data: &CommunicationValue,
     ) -> Result<(), CommunicationError> {
-        let first_result = {
-            let stream = Self::ensure_stream(conn, stream_opt).await?;
-            Self::write_frame(stream, data).await
-        };
+        let mut tries = 0usize;
+        loop {
+            if conn.quic_connection().close_reason().is_some() {
+                return Err(CommunicationError::StreamClosed);
+            }
 
-        if first_result.is_ok() {
-            return Ok(());
+            let res = {
+                let stream = Self::ensure_stream(conn, stream_opt).await?;
+                Self::write_frame(stream, data).await
+            };
+
+            if res.is_ok() {
+                return Ok(());
+            }
+
+            *stream_opt = None;
+            tries += 1;
+            if tries >= 4 {
+                let stream = Self::ensure_stream(conn, stream_opt).await?;
+                return Self::write_frame(stream, data).await;
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(20 * tries as u64)).await;
         }
-
-        *stream_opt = None;
-        let second_result = {
-            let stream = Self::ensure_stream(conn, stream_opt).await?;
-            Self::write_frame(stream, data).await
-        };
-
-        if second_result.is_ok() {
-            return Ok(());
-        }
-
-        *stream_opt = None;
-        second_result
     }
 
     async fn send_close_frame(conn: &Connection) -> Result<(), CommunicationError> {
@@ -215,9 +220,12 @@ impl Sender {
         let handle = self.handle.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = Self::send_close_frame(&connection).await {
-                println!("[Sender] failed to send close frame: {:?}", e);
+            if connection.quic_connection().close_reason().is_some() || handle.is_closed() {
+                handle.close(Some(CommunicationError::StreamClosed));
+                return;
             }
+
+            let _ = Self::send_close_frame(&connection).await;
 
             handle.close(Some(CommunicationError::StreamClosed));
 
@@ -365,13 +373,22 @@ impl Receiver {
     async fn read_one_frame(
         stream: &mut wtransport::RecvStream,
     ) -> Result<ReceivedFrame, CommunicationError> {
+        use std::io::ErrorKind;
         use tokio::io::AsyncReadExt;
 
-        let len = match stream.read_u32().await {
-            Ok(len) => len,
-            Err(e) => {
-                println!("[Receiver] read_u32 failed: {e}");
-                return Err(CommunicationError::StreamError);
+        let mut attempts = 0;
+        let len = loop {
+            match stream.read_u32().await {
+                Ok(len) => break len,
+                Err(e) => {
+                    if e.kind() == ErrorKind::Interrupted && attempts < 3 {
+                        attempts += 1;
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        continue;
+                    }
+                    println!("[Receiver] read_u32 failed: {e}");
+                    return Err(CommunicationError::StreamError);
+                }
             }
         };
 
@@ -393,8 +410,15 @@ impl Receiver {
         {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
-                println!("[Receiver] read_exact failed (len={}): {:?}", len, e);
-                return Err(e.into());
+                match timeout(
+                    Duration::from_millis(READ_TIMEOUT_MS),
+                    stream.read_exact(&mut buf),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    _ => return Err(e.into()),
+                }
             }
             Err(_) => {
                 println!("[Receiver] read_exact timed out (len={})", len);
