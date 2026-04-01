@@ -98,6 +98,8 @@ pub enum DataTypes {
 
     last_message_at = 87,
     height = 88,
+
+    sent_by_self = 89,
 }
 impl DataTypes {
     pub fn as_number(&self) -> u8 {
